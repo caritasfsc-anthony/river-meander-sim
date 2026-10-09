@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-HK">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>河曲實驗室 River Meander Lab</title>
+<meta name="description" content="在俯視圖畫出河道，調校流量與流速，觀察外彎侵蝕、內彎沉積及牛軛湖的形成。">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 100 100%27%3E%3Ctext y=%27.9em%27 font-size=%2790%27%3E%F0%9F%8C%8A%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo" aria-hidden="true">〰</span>
+    <div>
+      <h1>河曲實驗室 <small>River Meander Lab</small></h1>
+      <p class="sub">畫出河道 → 調校流量及流速 → 觀察河曲演變</p>
+    </div>
+  </div>
+  <div class="yearbox" aria-live="polite">
+    <span class="yl">年份 Year</span>
+    <span id="year" class="yv">0</span>
+  </div>
+</header>
+
+<main class="layout">
+  <section class="stage">
+    <div class="canvas-wrap" id="canvasWrap">
+      <canvas id="map" aria-label="河道俯視圖，可用滑鼠或手指繪畫"></canvas>
+      <div class="toast" id="toast" role="status"></div>
+    </div>
+    <div class="toolbar">
+      <button id="btnDraw" class="tool" aria-pressed="false">✏️ 畫河道<small>Draw</small></button>
+      <button id="btnPreset" class="tool">🌊 示範河道<small>Example</small></button>
+      <button id="btnClear" class="tool">🧹 清除<small>Clear</small></button>
+      <span class="sep"></span>
+      <button id="btnPlay" class="tool primary">▶ 開始<small>Start</small></button>
+      <button id="btnReset" class="tool">↺ 重設<small>Reset</small></button>
+    </div>
+  </section>
+
+  <aside class="panel">
+    <div class="card">
+      <h2>水流控制 <small>Flow</small></h2>
+      <label class="slider">
+        <span class="lab">流量 <small>Discharge</small></span>
+        <span class="val"><b id="qVal">600</b> m³/s</span>
+        <input id="q" type="range" min="100" max="2000" step="50" value="600">
+      </label>
+      <label class="slider">
+        <span class="lab">流速 <small>Velocity</small></span>
+        <span class="val"><b id="vVal">1.2</b> m/s</span>
+        <input id="v" type="range" min="0.3" max="3" step="0.1" value="1.2">
+      </label>
+      <label class="slider">
+        <span class="lab">時間速度 <small>Time speed</small></span>
+        <span class="val"><b id="tVal">10</b> 年/秒</span>
+        <input id="t" type="range" min="1" max="60" step="1" value="10">
+      </label>
+    </div>
+
+    <div class="card stats">
+      <h2>數據 <small>Data</small></h2>
+      <dl>
+        <div><dt>河道闊度</dt><dd><b id="sW">–</b> m</dd></div>
+        <div><dt>平均水深</dt><dd><b id="sH">–</b> m</dd></div>
+        <div><dt>彎曲度 Sinuosity</dt><dd><b id="sS">–</b></dd></div>
+        <div><dt>河道長度</dt><dd><b id="sL">–</b> km</dd></div>
+        <div><dt>平均遷移速率</dt><dd><b id="sR">–</b> m/年</dd></div>
+        <div><dt>牛軛湖數目</dt><dd><b id="sO">0</b></dd></div>
+      </dl>
+    </div>
+
+    <div class="card">
+      <h2>顯示 <small>Layers</small></h2>
+      <div class="toggles">
+        <label><input type="checkbox" id="lyParticles" checked> 水流粒子</label>
+        <label><input type="checkbox" id="lyLabels" checked> 侵蝕／沉積標籤</label>
+        <label><input type="checkbox" id="lyHistory" checked> 舊河道痕跡</label>
+      </div>
+      <ul class="legend">
+        <li><i style="background:#3b8fd8"></i>河水（白點越快＝流速越高）</li>
+        <li><i style="background:#e0533d"></i>外彎侵蝕（河岸後退）</li>
+        <li><i style="background:#ecd59c"></i>內彎沉積（曲流沙洲 point bar）</li>
+        <li><i style="background:#5b8fa8"></i>牛軛湖 oxbow lake</li>
+        <li><i style="background:#d9c79a"></i>舊河道痕跡（河曲帶）</li>
+      </ul>
+    </div>
+
+    <details class="card explain" open>
+      <summary><h2>原理說明 <small>How it works</small></h2></summary>
+      <ol>
+        <li><b>外彎侵蝕</b>：水流轉彎時，主流（最快、最深的水流）被拋向外彎，衝擊河岸，形成<b>河蝕崖</b>，河岸不斷後退。</li>
+        <li><b>內彎沉積</b>：內彎水流較慢、能量較低，泥沙沉積形成<b>曲流沙洲（點沙壩）</b>。</li>
+        <li><b>河曲遷移</b>：外彎蝕、內彎積，令河曲越來越彎，並慢慢向下游移動。</li>
+        <li><b>牛軛湖</b>：兩個彎位之間的<b>曲流頸</b>越來越窄，最後河水「截彎取直」，被遺棄的彎道成為牛軛湖，之後慢慢被泥沙填滿。</li>
+      </ol>
+      <p class="try"><b>試試看：</b>流量越大，河道越闊、遷移越快；流速越高，侵蝕力越強。比較不同設定下，第一個牛軛湖在第幾年出現？</p>
+      <p class="note">註：本模擬採用簡化的「中心線遷移模型」（參考 Howard &amp; Knutson, 1984），用作教學示意，數值並非精確預測。</p>
+    </details>
+  </aside>
+</main>
+
+<script src="sim.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
