@@ -13,6 +13,51 @@
     return L;
   }
 
+  function orient(a, b, c) {
+    return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+  }
+
+  function onSeg(a, b, p, eps) {
+    eps = eps == null ? 1e-6 : eps;
+    return p.x >= Math.min(a.x, b.x) - eps && p.x <= Math.max(a.x, b.x) + eps
+      && p.y >= Math.min(a.y, b.y) - eps && p.y <= Math.max(a.y, b.y) + eps;
+  }
+
+  /** 線段 ab 與 cd 是否相交；回傳交點參數 {x,y,t,u} 或 null（端點相鄰唔當交差） */
+  function segIntersect(a, b, c, d) {
+    const o1 = orient(a, b, c), o2 = orient(a, b, d);
+    const o3 = orient(c, d, a), o4 = orient(c, d, b);
+    if (o1 === 0 && onSeg(a, b, c)) return { x: c.x, y: c.y, t: 0, u: 0 };
+    if (o2 === 0 && onSeg(a, b, d)) return { x: d.x, y: d.y, t: 0, u: 0 };
+    if (o3 === 0 && onSeg(c, d, a)) return { x: a.x, y: a.y, t: 0, u: 0 };
+    if (o4 === 0 && onSeg(c, d, b)) return { x: b.x, y: b.y, t: 0, u: 0 };
+    if ((o1 > 0) === (o2 > 0) || (o3 > 0) === (o4 > 0)) return null;
+    const den = (a.x - b.x) * (c.y - d.y) - (a.y - b.y) * (c.x - d.x);
+    if (Math.abs(den) < 1e-12) return null;
+    const t = ((a.x - c.x) * (c.y - d.y) - (a.y - c.y) * (c.x - d.x)) / den;
+    const u = -((a.x - b.x) * (a.y - c.y) - (a.y - b.y) * (a.x - c.x)) / den;
+    if (t < 0 || t > 1 || u < 0 || u > 1) return null;
+    return { x: a.x + t * (b.x - a.x), y: a.y + t * (b.y - a.y), t, u };
+  }
+
+  /** 折線自交：非相鄰線段相交。回傳 [{i,j,pt}, ...]（i < j-1） */
+  function findSelfIntersections(pts) {
+    const hits = [];
+    if (!pts || pts.length < 4) return hits;
+    const n = pts.length;
+    for (let i = 0; i < n - 1; i++) {
+      for (let j = i + 2; j < n - 1; j++) {
+        if (j === i + 1) continue;
+        // 首尾相接唔當自交
+        if (i === 0 && j === n - 2) continue;
+        const hit = segIntersect(pts[i], pts[i + 1], pts[j], pts[j + 1]);
+        if (hit) hits.push({ i, j, pt: { x: hit.x, y: hit.y } });
+      }
+    }
+    return hits;
+  }
+
+
   function resample(pts, ds) {
     if (pts.length < 2) return pts.slice();
     const L = polyLength(pts);
@@ -95,12 +140,22 @@
     /** 沿程河寬：上游較窄 → 河口明顯加闊（河口喇叭口） */
     widthAt(frac) {
       const mid = this.width;
-      const up = mid * 0.70;
-      const mouth = mid * 1.65;
+      const up = mid * 0.72;
+      const mouth = mid * 1.35; // 河口略闊，但唔好闊到岸線自疊成結
       const t = Math.max(0, Math.min(1, frac));
-      // 下游段加速加闊
       const ease = t * t * (3 - 2 * t);
-      return up + (mouth - up) * (0.25 * t + 0.75 * ease);
+      return up + (mouth - up) * (0.3 * t + 0.7 * ease);
+    }
+
+    /** 局部河寬：受曲率半徑限制，避免河岸多邊形喺急彎自疊 */
+    localDrawWidth(frac, curv) {
+      let w = this.widthAt(frac);
+      const c = Math.abs(curv || 0);
+      if (c > 1e-4) {
+        const R = 1 / c; // 約略曲率半徑（米）
+        w = Math.min(w, Math.max(this.upstreamWidth * 0.6, R * 1.1));
+      }
+      return w;
     }
 
     get upstreamWidth() { return this.widthAt(0); }
@@ -151,6 +206,7 @@
       this.initial = this.pts.map(q => ({ x: q.x, y: q.y }));
       this.sourceAnchor = { x: this.pts[0].x, y: this.pts[0].y };
       this.computeGeom();
+      this.resolveSelfIntersections(12);
       this.checkCutoffs(true);
       this.pts = this.clipChannelToLand(this.pts);
       this.computeGeom();
@@ -252,7 +308,7 @@
       return { x: nx, y: ny };
     }
 
-        step(dt) {
+    step(dt) {
       const p = this.pts, n = p.length;
       if (n < 3) return 0;
       const g = this.geom || this.computeGeom();
@@ -262,7 +318,8 @@
       const np = new Array(n);
 
       const sinNow = this.sinuosity();
-      const sinDamp = Math.min(1, 3.0 / Math.max(1.2, sinNow));
+      // 高彎曲度時大幅減速，避免未截彎前已打成結
+      const sinDamp = Math.min(1, 1.85 / Math.max(1.15, sinNow));
       for (let i = 0; i < n; i++) {
         // 已近海／入海嘅節點唔再遷移
         if (this.isOcean(p[i].x, p[i].y, 15)) {
@@ -275,8 +332,10 @@
         else if (frac > 0.92) taper = (1 - frac) / 0.08;
         taper = Math.max(0.05, taper);
 
-        let d = E * g.R[i] * dt * taper * (0.55 + 0.45 * sinDamp);
-        const lim = 0.25 * ds;
+        // 局部曲率過大時再減速（防止單彎纏過鄰彎）
+        const curvDamp = 1 / (1 + Math.abs(g.cw[i] || 0) * 2.2);
+        let d = E * g.R[i] * dt * taper * (0.45 + 0.55 * sinDamp) * curvDamp;
+        const lim = 0.16 * ds;
         if (d > lim) d = lim; else if (d < -lim) d = -lim;
         sum += Math.abs(d);
 
@@ -339,8 +398,16 @@
 
       for (const o of this.oxbows) o.age += dt;
       this.oxbows = this.oxbows.filter(o => o.age < 1100 && this.oxbowOnLand(o));
+      // 每步：先清自交，再做鄰近曲流頸截彎；活躍河道必須係簡單曲線
+      this.resolveSelfIntersections(8);
       this.checkCutoffs(false);
-      this.pts = this.clipChannelToLand(this.pts);
+      // 彎曲度過高 → 強制截最大環，保持開放河曲（唔好變意粉）
+      let guard = 0;
+      while (this.sinuosity() > 2.15 && guard++ < 6) {
+        if (!this.forceLargestLoopCutoff()) break;
+      }
+      this.pts = this.spreadBends(this.clipChannelToLand(this.pts));
+      this.resolveSelfIntersections(4);
       this.computeGeom();
       const rate = meanMig / Math.max(dt, 1e-6);
       this.meanRate = this.meanRate ? this.meanRate * 0.9 + rate * 0.1 : rate;
@@ -382,19 +449,164 @@
     }
 
     /**
-     * 截彎取直：曲流頸必須明顯窄於河寬，需持續一段時間，且避開源／口。
-     * @param {boolean} immediate 初始自交時可即時截彎
+     * 活躍河道自交數（非相鄰線段相交）。教學上必須為 0。
+     */
+    countSelfIntersections() {
+      return findSelfIntersections(this.pts).length;
+    }
+
+    /**
+     * 執行一次截彎：丟掉 i..j 環路作牛軛湖，重連成簡單曲線。
+     */
+    applyCutoff(i, j, opts) {
+      opts = opts || {};
+      const p = this.pts, W = this.width;
+      if (i < 0 || j <= i + 2 || j >= p.length) return false;
+      let oxPts = p.slice(i, j + 1).map(q => ({ x: q.x, y: q.y }));
+      oxPts = this.clipOxbowPts(oxPts);
+      const oxLen = polyLength(oxPts);
+      const maxOx = Math.min(this.worldH * 0.35, W * 28);
+      // 自交強制截：即使環路較長都保留（截短至 maxOx）
+      if (oxPts.length >= 4) {
+        if (oxLen > maxOx) {
+          // 只留環路中段做成短新月
+          const keep = Math.max(6, Math.floor(oxPts.length * (maxOx / oxLen)));
+          const mid = Math.floor((oxPts.length - keep) / 2);
+          oxPts = oxPts.slice(mid, mid + keep);
+        }
+        if (this.oxbowOnLand({ pts: oxPts }) || opts.forceOxbow) {
+          if (oxPts.length >= 4 && this.oxbowOnLand({ pts: oxPts })) {
+            this.oxbows.push({ pts: oxPts, age: 0, width: W * 0.85, year: this.year, closed: true });
+          }
+        }
+      }
+      const mid = {
+        x: (p[i].x + p[j].x) * 0.5,
+        y: (p[i].y + p[j].y) * 0.5
+      };
+      const np = p.slice(0, i + 1).concat([mid], p.slice(j));
+      for (let it = 0; it < 10; it++) {
+        for (let k = Math.max(1, i - 4); k <= Math.min(np.length - 2, i + 6); k++) {
+          np[k] = {
+            x: (np[k - 1].x + 2 * np[k].x + np[k + 1].x) / 4,
+            y: (np[k - 1].y + 2 * np[k].y + np[k + 1].y) / 4
+          };
+        }
+      }
+      let out = resample(np, this.ds);
+      if (out.length > 420) out = resample(np, this.ds * (out.length / 380));
+      this.pts = this.clipChannelToLand(out);
+      this.cutoffs++;
+      this.events.push({ type: 'cutoff', year: this.year, neck: dist(p[i], p[j]), forced: !!opts.forced });
+      this.cutoffCooldown = opts.forced ? 4 : 12;
+      this.pendingNeck = null;
+      this.neckTimer = 0;
+      this.computeGeom();
+      return true;
+    }
+
+    /**
+     * 硬規則：活躍中心線唔准自交。發現線段相交就即刻截彎。
+     */
+    resolveSelfIntersections(maxCuts) {
+      maxCuts = maxCuts == null ? 6 : maxCuts;
+      let cuts = 0;
+      while (cuts < maxCuts) {
+        const hits = findSelfIntersections(this.pts);
+        if (!hits.length) break;
+        // 揀最短環路先截（避免一次切掉大半條河）
+        let best = null, bestLen = Infinity;
+        for (const h of hits) {
+          const loopLen = polyLength(this.pts.slice(h.i, h.j + 2));
+          if (loopLen < bestLen) { bestLen = loopLen; best = h; }
+        }
+        if (!best) break;
+        // 交點附近節點：用 i+1 同 j 做頸
+        const i = best.i + 1;
+        const j = best.j;
+        if (j - i < 3) {
+          // 極短自交：直接刪中間點
+          const np = this.pts.slice(0, best.i + 1).concat(this.pts.slice(best.j + 1));
+          this.pts = this.clipChannelToLand(resample(np, this.ds));
+          this.cutoffs++;
+          this.computeGeom();
+        } else {
+          this.applyCutoff(i, j, { forced: true, forceOxbow: true });
+        }
+        cuts++;
+      }
+      return cuts;
+    }
+
+    /**
+     * 輕推過近嘅非相鄰彎，令彎曲沿下游展開，唔好全部堆喺河口。
+     */
+    spreadBends(pts) {
+      if (!pts || pts.length < 8) return pts;
+      const out = pts.map(q => ({ x: q.x, y: q.y }));
+      const W = this.width;
+      const minSep = W * 1.6;
+      const minAlong = Math.max(4, Math.ceil((3.5 * W) / this.ds));
+      for (let i = 2; i < out.length - 2; i++) {
+        for (let j = i + minAlong; j < out.length - 1; j++) {
+          const d = dist(out[i], out[j]);
+          if (d >= minSep || d < 1e-6) continue;
+          // 太近但未到截彎閾值：輕輕推開
+          const push = (minSep - d) * 0.12;
+          const ux = (out[j].x - out[i].x) / d;
+          const uy = (out[j].y - out[i].y) / d;
+          out[i].x -= ux * push * 0.5;
+          out[i].y -= uy * push * 0.5;
+          out[j].x += ux * push * 0.5;
+          out[j].y += uy * push * 0.5;
+        }
+      }
+      return out;
+    }
+
+    /**
+     * 當彎曲度過高：搵「頸最窄／環最明顯」嘅非相鄰對強制截彎。
+     */
+    forceLargestLoopCutoff() {
+      const p = this.pts, n = p.length, W = this.width;
+      if (n < 16) return false;
+      const minAlong = Math.max(5, Math.ceil((3.0 * W) / this.ds));
+      const margin = Math.max(3, Math.ceil(n * 0.04));
+      // 預計算弧長，避免每對都 polyLength
+      const S = new Float64Array(n);
+      for (let i = 1; i < n; i++) S[i] = S[i - 1] + dist(p[i - 1], p[i]);
+      let best = null, bestScore = -1;
+      for (let i = margin; i < n - margin; i++) {
+        for (let j = i + minAlong; j < n - margin; j++) {
+          const d = dist(p[i], p[j]);
+          if (d > W * 4.5) continue;
+          const loopLen = S[j] - S[i];
+          if (loopLen < W * 5) continue;
+          if (loopLen > this.worldH * 0.45) continue;
+          const loopSin = loopLen / (d || 1);
+          if (loopSin < 1.7) continue;
+          const score = loopSin / (d / W + 0.25);
+          if (score > bestScore) { bestScore = score; best = [i, j]; }
+        }
+      }
+      if (!best) return false;
+      return this.applyCutoff(best[0], best[1], { forced: true });
+    }
+
+    /**
+     * 截彎取直：非相鄰節點接近至 ~1.0–1.5× 河寬就截；
+     * 自交已由 resolveSelfIntersections 處理。
      */
     checkCutoffs(immediate) {
+      // 自交唔受 cooldown 限制
+      this.resolveSelfIntersections(immediate ? 12 : 4);
       if (!immediate && this.cutoffCooldown > 0) return;
       const p = this.pts, n = p.length, W = this.width;
-      if (n < 14) return;
+      if (n < 12) return;
 
-      // 河岸幾乎相觸（約一個河寬）才截；高彎曲度時略放寬
-      const sin = this.sinuosity();
-      const thr = W * (immediate ? 1.0 : (sin > 3.2 ? 1.15 : sin > 2.5 ? 0.95 : 0.8));
-      const minAlong = Math.max(8, Math.ceil((5.5 * W) / this.ds));
-      const marginNodes = Math.max(5, Math.ceil(n * 0.06));
+      const thr = W * (immediate ? 1.5 : 1.25);
+      const minAlong = Math.max(6, Math.ceil((4.0 * W) / this.ds));
+      const marginNodes = Math.max(3, Math.ceil(n * 0.04));
 
       const cell = Math.max(thr, 16), grid = new Map();
       const key = (cx, cy) => cx * 100003 + cy;
@@ -406,63 +618,32 @@
 
       let best = null, bestScore = -1;
       for (let i = marginNodes; i < n - marginNodes; i++) {
-        if (p[i].y > this.waterLineY(p[i].x) - 120) continue;
+        if (p[i].y > this.waterLineY(p[i].x) - 80) continue;
         const cx = Math.floor(p[i].x / cell), cy = Math.floor(p[i].y / cell);
         for (let ox = -1; ox <= 1; ox++) for (let oy = -1; oy <= 1; oy++) {
           const list = grid.get(key(cx + ox, cy + oy));
           if (!list) continue;
           for (const j of list) {
             if (j - i < minAlong || j >= n - marginNodes) continue;
-            if (p[j].y > this.waterLineY(p[j].x) - 120) continue;
+            if (p[j].y > this.waterLineY(p[j].x) - 80) continue;
             const d = dist(p[i], p[j]);
             if (d >= thr) continue;
             const loopPts = p.slice(i, j + 1);
             const loopLen = polyLength(loopPts);
             const loopSin = loopLen / (d || 1);
-            // 只要成熟短彎（新月形），拒絕超長扭曲結
-            if (loopSin < (immediate ? 2.0 : 2.4)) continue;
-            if (loopSin > 10) continue;
-            if (loopLen > Math.min(this.worldH * 0.28, W * 22)) continue;
-            // 分數：頸越窄越好，長度適中加分
-            const score = (1 / (d / W + 0.2)) * (loopSin < 5 ? loopSin : (8 - loopSin));
+            // 成熟彎：路徑明顯長過頸距；拒絕半個地圖嘅超長結（自交已另處理）
+            if (loopSin < (immediate ? 1.6 : 1.8)) continue;
+            if (loopLen > Math.min(this.worldH * 0.32, W * 26)) continue;
+            const score = (1 / (d / W + 0.15)) * Math.min(loopSin, 4.5);
             if (score > bestScore) { bestScore = score; best = [i, j, d, loopSin]; }
           }
         }
       }
 
       if (!best) { this.pendingNeck = null; this.neckTimer = 0; return; }
-
-      const [i, j, d, loopSin] = best;
-      // 頸已夠窄（d < thr）且環路夠彎即截；靠 cooldown 避免連斬
-      if (!immediate && d > W * 0.95 && this.sinuosity() < 3.0) return;
-
-      let oxPts = p.slice(i, j + 1).map(q => ({ x: q.x, y: q.y }));
-      oxPts = this.clipOxbowPts(oxPts);
-      const oxLen = polyLength(oxPts);
-      // 只要短小新月形，拒絕超長／跨半個地圖嘅扭曲結
-      const maxOx = Math.min(this.worldH * 0.28, W * 22);
-      if (oxPts.length >= 6 && oxLen <= maxOx && this.oxbowOnLand({ pts: oxPts })) {
-        this.oxbows.push({ pts: oxPts, age: 0, width: W * 0.9, year: this.year, closed: true });
-      }
-
-      const np = p.slice(0, i + 1).concat(p.slice(j));
-      for (let it = 0; it < 14; it++) {
-        for (let k = Math.max(1, i - 6); k <= Math.min(np.length - 2, i + 6); k++) {
-          np[k] = {
-            x: (np[k - 1].x + 2 * np[k].x + np[k + 1].x) / 4,
-            y: (np[k - 1].y + 2 * np[k].y + np[k + 1].y) / 4
-          };
-        }
-      }
-      let out = resample(np, this.ds);
-      if (out.length > 420) out = resample(np, this.ds * (out.length / 380));
-      this.pts = this.enforceSeawardNearCoast(this.truncateAtCoast(out));
-      this.cutoffs++;
-      this.events.push({ type: 'cutoff', year: this.year, loopSin, neck: d });
-      this.cutoffCooldown = 65;
-      this.pendingNeck = null;
-      this.neckTimer = 0;
-      this.computeGeom();
+      const [i, j] = best;
+      this.applyCutoff(i, j, { forced: !!immediate });
+      // 可能仲有第二個頸：短 cooldown 後下一步再截
     }
 
     /** 點是否已入海／到達水線（含緊貼海岸） */
@@ -665,8 +846,8 @@
         const y = y0 + (y1 - y0) * t;
         const env = Math.sin(Math.PI * t);
         const x = cx
-          + worldW * 0.20 * env * Math.sin(2 * Math.PI * t * 3.2 + 0.4)
-          + worldW * 0.055 * Math.sin(2 * Math.PI * t * 7.3);
+          + worldW * 0.14 * env * Math.sin(2 * Math.PI * t * 2.6 + 0.35)
+          + worldW * 0.035 * Math.sin(2 * Math.PI * t * 5.5);
         pts.push({ x, y });
       }
       return pts;
@@ -676,6 +857,8 @@
   RiverSim.resample = resample;
   RiverSim.chaikin = chaikin;
   RiverSim.polyLength = polyLength;
+  RiverSim.findSelfIntersections = findSelfIntersections;
+  RiverSim.segIntersect = segIntersect;
 
   if (typeof module !== 'undefined' && module.exports) module.exports = RiverSim;
   else root.RiverSim = RiverSim;

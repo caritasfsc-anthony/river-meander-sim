@@ -188,6 +188,10 @@
   }
 
   function channelFrac(i, n) { return n <= 1 ? 0 : i / (n - 1); }
+  function localW(frac, idx, g) {
+    const cw = (g && g.cw && g.cw[idx] != null) ? g.cw[idx] / Math.max(1e-3, sim.width) : 0;
+    return sim.localDrawWidth(frac, cw);
+  }
 
   /** 岸點唔准畫過水線（避免河道多邊形「伸入海」） */
   function clampLandY(x, y) {
@@ -195,61 +199,112 @@
     return y > lim ? lim : y;
   }
 
-  /** 沿程變寬河道：用左右岸多邊形繪製 */
+  /** 沿程變寬河道：用左右岸多邊形繪製；河口喇叭收束到一點再交羽流 */
   function drawVariableChannel(c, land, g) {
-    // 末端略為提早收束，交俾羽流溶入海，避免「河喺海面蜿蜒」
-    const cut = Math.max(2, Math.floor(land.length * 0.97));
-    land = land.slice(0, cut);
     const n = land.length;
+    if (n < 2) return;
     const left = [], right = [];
     for (let k = 0; k < n; k++) {
       const idx = Math.min(g.nx.length - 1, land[k].i != null ? land[k].i : k);
       const frac = channelFrac(k, n);
-      let w = sim.widthAt(frac);
-      // 最後一截逐漸透明感：闊度先略收再交羽流
-      if (frac > 0.9) w *= 1 + (frac - 0.9) * 2.5;
-      const nx = g.nx[idx] || 0, ny = g.ny[idx] || 1;
-      const lx = land[k].x + nx * w * 0.5, ly = clampLandY(lx, land[k].y + ny * w * 0.5);
-      const rx = land[k].x - nx * w * 0.5, ry = clampLandY(rx, land[k].y - ny * w * 0.5);
+      let w = localW(frac, idx, g);
+      // 近河口：先略加闊再平滑收束到尖端（避免「方頭」浮喺海岸上）
+      if (frac > 0.78) {
+        const t = (frac - 0.78) / 0.22;
+        const flare = 1 + 0.55 * Math.sin(Math.min(1, t) * Math.PI); // 中段最闊
+        const taper = frac > 0.92 ? Math.pow((1 - frac) / 0.08, 1.1) : 1;
+        w *= flare * Math.max(0.22, taper);
+      }
+      let nx = g.nx[idx] || 0, ny = g.ny[idx] || 0;
+      // 末端法線推成向海（避免左右岸被 clamp 成同一水平線）
+      if (frac > 0.9) {
+        const tx = land[n - 1].x - land[Math.max(0, n - 3)].x;
+        const ty = land[n - 1].y - land[Math.max(0, n - 3)].y;
+        const tl = Math.hypot(tx, ty) || 1;
+        nx = -ty / tl; ny = tx / tl;
+      }
+      const lx = land[k].x + nx * w * 0.5;
+      const rx = land[k].x - nx * w * 0.5;
+      let ly = land[k].y + ny * w * 0.5;
+      let ry = land[k].y - ny * w * 0.5;
+      const limL = sim.waterLineY(lx) - 1;
+      const limR = sim.waterLineY(rx) - 1;
+      if (ly > limL) ly = limL;
+      if (ry > limR) ry = limR;
       left.push({ x: lx, y: ly });
       right.push({ x: rx, y: ry });
     }
+    // 尖端收成一點（接羽流），唔好左右岸平行截斷成方頭
+    const tip = land[n - 1];
+    const tipY = Math.min(tip.y, sim.waterLineY(tip.x) - 2);
+    left[n - 1] = { x: tip.x, y: tipY };
+    right[n - 1] = { x: tip.x, y: tipY };
+
     // 河岸
     c.beginPath();
     c.moveTo(left[0].x, left[0].y);
-    for (const q of left) c.lineTo(q.x, q.y);
-    for (let k = right.length - 1; k >= 0; k--) c.lineTo(right[k].x, right[k].y);
+    for (let k = 1; k < n; k++) c.lineTo(left[k].x, left[k].y);
+    for (let k = n - 2; k >= 0; k--) c.lineTo(right[k].x, right[k].y);
     c.closePath();
     c.fillStyle = '#a88b5c';
     c.fill();
-    // 略內縮畫河水
+    // 河水（同樣收尖）
     c.beginPath();
     for (let k = 0; k < n; k++) {
       const idx = Math.min(g.nx.length - 1, land[k].i != null ? land[k].i : k);
       const frac = channelFrac(k, n);
-      const w = sim.widthAt(frac) * 0.82;
-      const nx = g.nx[idx] || 0, ny = g.ny[idx] || 1;
-      const x = land[k].x + nx * w * 0.5, y = land[k].y + ny * w * 0.5;
+      let w = localW(frac, idx, g) * 0.82;
+      if (frac > 0.78) {
+        const t = (frac - 0.78) / 0.22;
+        const flare = 1 + 0.55 * Math.sin(Math.min(1, t) * Math.PI);
+        const taper = frac > 0.92 ? Math.pow((1 - frac) / 0.08, 1.1) : 1;
+        w *= flare * Math.max(0.18, taper);
+      }
+      let nx = g.nx[idx] || 0, ny = g.ny[idx] || 0;
+      if (frac > 0.9) {
+        const tx = land[n - 1].x - land[Math.max(0, n - 3)].x;
+        const ty = land[n - 1].y - land[Math.max(0, n - 3)].y;
+        const tl = Math.hypot(tx, ty) || 1;
+        nx = -ty / tl; ny = tx / tl;
+      }
+      let x = land[k].x + nx * w * 0.5, y = land[k].y + ny * w * 0.5;
+      if (k === n - 1) { x = tip.x; y = tipY; }
+      else { y = Math.min(y, sim.waterLineY(x) - 1); }
       k ? c.lineTo(x, y) : c.moveTo(x, y);
     }
-    for (let k = n - 1; k >= 0; k--) {
+    for (let k = n - 2; k >= 0; k--) {
       const idx = Math.min(g.nx.length - 1, land[k].i != null ? land[k].i : k);
       const frac = channelFrac(k, n);
-      const w = sim.widthAt(frac) * 0.82;
-      const nx = g.nx[idx] || 0, ny = g.ny[idx] || 1;
-      c.lineTo(land[k].x - nx * w * 0.5, land[k].y - ny * w * 0.5);
+      let w = localW(frac, idx, g) * 0.82;
+      if (frac > 0.78) {
+        const t = (frac - 0.78) / 0.22;
+        const flare = 1 + 0.55 * Math.sin(Math.min(1, t) * Math.PI);
+        const taper = frac > 0.92 ? Math.pow((1 - frac) / 0.08, 1.1) : 1;
+        w *= flare * Math.max(0.18, taper);
+      }
+      let nx = g.nx[idx] || 0, ny = g.ny[idx] || 0;
+      if (frac > 0.9) {
+        const tx = land[n - 1].x - land[Math.max(0, n - 3)].x;
+        const ty = land[n - 1].y - land[Math.max(0, n - 3)].y;
+        const tl = Math.hypot(tx, ty) || 1;
+        nx = -ty / tl; ny = tx / tl;
+      }
+      let x = land[k].x - nx * w * 0.5, y = land[k].y - ny * w * 0.5;
+      y = Math.min(y, sim.waterLineY(x) - 1);
+      c.lineTo(x, y);
     }
     c.closePath();
     c.fillStyle = '#3b8fd8';
     c.fill();
-    // 深泓線（偏外彎）
+    // 深泓線（唔畫到尖端最後 3%）
+    const nDeep = Math.max(2, Math.floor(n * 0.97));
     c.strokeStyle = 'rgba(25,90,165,0.45)';
     c.lineWidth = Math.max(4, sim.widthAt(0.5) * 0.22);
     c.lineCap = 'round'; c.lineJoin = 'round';
     c.beginPath();
-    for (let k = 0; k < n; k++) {
+    for (let k = 0; k < nDeep; k++) {
       const idx = Math.min(g.cw.length - 1, land[k].i != null ? land[k].i : k);
-      const w = sim.widthAt(channelFrac(k, n));
+      const w = localW(channelFrac(k, n), idx, g);
       const off = -Math.max(-0.25, Math.min(0.25, (g.cw[idx] || 0) * 0.85)) * w;
       const nx = g.nx[idx] || 0, ny = g.ny[idx] || 0;
       const x = land[k].x + nx * off, y = land[k].y + ny * off;
@@ -258,29 +313,35 @@
     c.stroke();
   }
 
-  /** 河口羽流：河道在三角洲尖端加闊、變淡，溶入海洋（唔再畫出海面河曲） */
+  /** 河口羽流：由尖端向海淡出，單一河口；唔再畫第二條入海河道 */
   function drawMouthPlume(c, land) {
     if (land.length < 2) return;
     const tip = land[land.length - 1];
+    const prev = land[Math.max(0, land.length - 4)];
     const w = sim.mouthWidth;
-    const hw = Math.max(w * 1.2, 40);
-    // 喇叭口半透明
-    const grd = c.createRadialGradient(tip.x, tip.y, w * 0.2, tip.x, tip.y + hw * 0.6, hw * 1.4);
-    grd.addColorStop(0, 'rgba(80,160,210,0.55)');
-    grd.addColorStop(0.45, 'rgba(70,140,195,0.28)');
-    grd.addColorStop(1, 'rgba(60,120,180,0)');
+    const hw = Math.max(w * 1.15, 36);
+    const tx = tip.x - prev.x, ty = tip.y - prev.y;
+    const tl = Math.hypot(tx, ty) || 1;
+    const ux = tx / tl, uy = Math.max(0.35, ty / tl); // 偏向向海
+    const seaY = Math.min(WH - 12, sim.waterLineY(tip.x) + hw * 0.9);
+    // 喇叭多邊形：尖端 → 海中淡出
+    const nx = -uy, ny = ux;
+    const p0 = { x: tip.x + nx * w * 0.55, y: tip.y + ny * w * 0.55 };
+    const p1 = { x: tip.x - nx * w * 0.55, y: tip.y - ny * w * 0.55 };
+    const p2 = { x: tip.x + ux * hw * 0.95 - nx * w * 0.15, y: Math.min(seaY, tip.y + uy * hw * 0.95) };
+    const p3 = { x: tip.x + ux * hw * 0.95 + nx * w * 0.15, y: Math.min(seaY, tip.y + uy * hw * 0.95) };
+    const grd = c.createLinearGradient(tip.x, tip.y, tip.x + ux * hw, tip.y + uy * hw);
+    grd.addColorStop(0, 'rgba(70,155,210,0.65)');
+    grd.addColorStop(0.45, 'rgba(65,140,200,0.28)');
+    grd.addColorStop(1, 'rgba(55,120,180,0)');
     c.fillStyle = grd;
     c.beginPath();
-    c.ellipse(tip.x, tip.y + hw * 0.35, hw * 0.95, hw * 0.7, 0, 0, Math.PI * 2);
+    c.moveTo(p0.x, p0.y);
+    c.lineTo(p1.x, p1.y);
+    c.lineTo(p2.x, p2.y);
+    c.lineTo(p3.x, p3.y);
+    c.closePath();
     c.fill();
-    // 短羽流條帶（向海淡出）
-    c.strokeStyle = 'rgba(90,170,215,0.35)';
-    c.lineWidth = w * 0.9;
-    c.lineCap = 'round';
-    c.beginPath();
-    c.moveTo(tip.x, tip.y);
-    c.lineTo(tip.x, Math.min(WH - 20, tip.y + hw * 0.85));
-    c.stroke();
   }
 
   function drawCoastAndDelta(c) {
