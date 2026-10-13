@@ -441,7 +441,12 @@
         sum += Math.abs(d);
 
         let mx = -g.nx[i] * d, my = -g.ny[i] * d;
-        // 唔好遷入海：若下一步入海就截喺岸邊
+        // 優先側向遷移：大幅抑制「向上游／上坡」（y 減少）分量
+        if (my < 0) my *= 0.18;
+        // 鄰點約束：唔好令本點明顯爬返上游
+        if (i > 0 && p[i].y + my < p[i - 1].y - this.width * 1.1) {
+          my = Math.max(my, p[i - 1].y - this.width * 1.1 - p[i].y);
+        }
         let nx_ = p[i].x + mx, ny_ = p[i].y + my;
         if (this.isOcean(nx_, ny_, 5)) {
           ny_ = this.waterLineY(nx_) - 4;
@@ -454,10 +459,12 @@
       // 上游：彈簧拉向 sourceAnchor（可輕微漂移）
       if (this.sourceAnchor) {
         const k = 0.35;
+        const sy = Math.max(p[0].y, this.sourceAnchor.y); // 源頭唔准北移
         np[0] = {
           x: p[0].x + (this.sourceAnchor.x - p[0].x) * k * Math.min(1, dt),
-          y: p[0].y + (this.sourceAnchor.y - p[0].y) * k * Math.min(1, dt)
+          y: p[0].y + (sy - p[0].y) * k * Math.min(1, dt)
         };
+        if (np[0].y < p[0].y) np[0].y = p[0].y;
       }
 
       // 河口：鎖在海岸／三角洲水線內側
@@ -481,6 +488,7 @@
       let nxt = resample(sm, ds);
       if (nxt.length > 420) nxt = resample(sm, ds * (nxt.length / 380));
       nxt = this.attractToValley(nxt, 0.12);
+      nxt = this.enforceDownslopeProgress(nxt);
       this.pts = this.clipChannelToLand(nxt);
       this.year += dt;
       this.ph1 += (Math.random() - 0.5) * 0.4 * Math.sqrt(dt);
@@ -513,7 +521,10 @@
       while (this.sinuosity() > 2.0 && guard++ < 4) {
         if (!this.forceLargestLoopCutoff()) break;
       }
-      this.pts = this.attractToValley(this.spreadBends(this.clipChannelToLand(this.pts)), 0.08);
+      this.pts = this.enforceDownslopeProgress(
+        this.attractToValley(this.spreadBends(this.clipChannelToLand(this.pts)), 0.08)
+      );
+      this.cutUpstreamHairpins();
       this.resolveSelfIntersections(4);
       this.computeGeom();
       const rate = meanMig / Math.max(dt, 1e-6);
@@ -811,7 +822,102 @@
 
     /** @deprecated 用 truncateAtCoast */
     clipChannelToLand(pts) {
-      return this.enforceSeawardNearCoast(this.truncateAtCoast(pts));
+      return this.enforceDownslopeProgress(
+        this.enforceSeawardNearCoast(this.truncateAtCoast(pts))
+      );
+    }
+
+    /**
+     * 沿程大致向海（Y 增加）。允許輕微曲流折返，但唔准髮夾彎向上游爬。
+     * maxBack ≈ min(2.0×河寬, 0.18×波長)。
+     */
+    maxUpslopeAllowance() {
+      return Math.min(this.width * 2.0, this.meanderWavelength * 0.18);
+    }
+
+    enforceDownslopeProgress(pts) {
+      if (!pts || pts.length < 3) return pts;
+      const out = pts.map(q => ({ x: q.x, y: q.y }));
+      const maxBack = this.maxUpslopeAllowance();
+      let runMax = out[0].y;
+      for (let i = 1; i < out.length; i++) {
+        // 相鄰：唔好大幅向北
+        const floorLocal = out[i - 1].y - maxBack * 0.55;
+        if (out[i].y < floorLocal) out[i].y = floorLocal;
+        // 包絡：相對已達最南點，折返唔好超過 maxBack
+        const floorEnv = runMax - maxBack;
+        if (out[i].y < floorEnv) out[i].y = floorEnv;
+        runMax = Math.max(runMax, out[i].y);
+      }
+      // 源頭之後前 8% 節點：更嚴，避免近源髮夾
+      const nHead = Math.max(4, Math.floor(out.length * 0.1));
+      const headBack = Math.min(maxBack * 0.45, this.width * 1.1);
+      let headMax = out[0].y;
+      for (let i = 1; i < nHead && i < out.length; i++) {
+        if (out[i].y < headMax - headBack) out[i].y = headMax - headBack;
+        if (out[i].y < out[i - 1].y - headBack * 0.7) out[i].y = out[i - 1].y - headBack * 0.7;
+        headMax = Math.max(headMax, out[i].y);
+      }
+      return out;
+    }
+
+    /**
+     * 若河道離開源頭後又折返接近源頭 Y → 視為向上游髮夾，強制截彎。
+     */
+    cutUpstreamHairpins() {
+      const p = this.pts;
+      if (!p || p.length < 16) return 0;
+      const y0 = p[0].y;
+      const yMouth = p[p.length - 1].y;
+      const span = Math.max(200, yMouth - y0);
+      const nearSrc = y0 + span * 0.18;
+      let farSouth = y0;
+      let cuts = 0;
+      for (let i = 2; i < p.length - 2; i++) {
+        farSouth = Math.max(farSouth, p[i].y);
+        // 已去到夠下游，又折返接近源頭
+        if (farSouth > y0 + span * 0.28 && p[i].y < nearSrc) {
+          // 搵環路起點：最近一個遠南點
+          let jStart = 1;
+          for (let k = i - 1; k >= 1; k--) {
+            if (p[k].y >= farSouth - this.width * 0.5) { jStart = k; break; }
+          }
+          if (i - jStart >= 6) {
+            if (this.applyCutoff(jStart, i, { forced: true })) {
+              cuts++;
+              farSouth = this.pts[0].y;
+              break; // pts 已變，交俾下一步再掃
+            }
+          }
+        }
+      }
+      return cuts;
+    }
+
+    /** 測試：沿程 Y 折返是否超過上限 */
+    maxUpslopeReversal() {
+      const p = this.pts;
+      if (!p || p.length < 2) return 0;
+      let runMax = p[0].y, worst = 0;
+      for (let i = 1; i < p.length; i++) {
+        worst = Math.max(worst, runMax - p[i].y);
+        runMax = Math.max(runMax, p[i].y);
+      }
+      return worst;
+    }
+
+    /** 測試：離開源頭後有冇折返到接近源頭 */
+    hasUpstreamHairpin() {
+      const p = this.pts;
+      if (!p || p.length < 8) return false;
+      const y0 = p[0].y;
+      const span = Math.max(200, p[p.length - 1].y - y0);
+      let far = y0;
+      for (let i = 1; i < p.length; i++) {
+        far = Math.max(far, p[i].y);
+        if (far > y0 + span * 0.3 && p[i].y < y0 + span * 0.16) return true;
+      }
+      return false;
     }
 
     /**

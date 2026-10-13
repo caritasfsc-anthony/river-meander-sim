@@ -28,6 +28,13 @@ function assertCentered(sim, label) {
     label + ': meanX=' + st.mean.toFixed(0) + ' not mid-map');
 }
 
+function assertDownslope(sim, label) {
+  const allow = sim.maxUpslopeAllowance() * 1.05;
+  const rev = sim.maxUpslopeReversal();
+  assert(rev <= allow, label + ': upslope reversal ' + rev.toFixed(1) + ' > ' + allow.toFixed(1));
+  assert.strictEqual(sim.hasUpstreamHairpin(), false, label + ': upstream hairpin');
+}
+
 function run(Q, v, years) {
   const sim = new RiverSim({ Q, v });
   sim.setPath(RiverSim.presetPath(sim.worldW, sim.worldH, sim.oceanH));
@@ -46,15 +53,18 @@ function run(Q, v, years) {
     if (y % 100 === 0) {
       assertNoSeaClimb(sim, 'Q' + Q + '@' + y);
       assertSimpleChannel(sim, 'Q' + Q + '@' + y);
+      assertDownslope(sim, 'Q' + Q + '@' + y);
     }
     if (y >= 500 && y % 50 === 0) {
       assertCentered(sim, 'Q' + Q + '@' + y);
+      assertDownslope(sim, 'Q' + Q + '@' + y);
       sins.push(sim.sinuosity());
     }
   }
   assertNoSeaClimb(sim, 'Q' + Q + ' final');
   assertSimpleChannel(sim, 'Q' + Q + ' final');
   assertCentered(sim, 'Q' + Q + ' final');
+  assertDownslope(sim, 'Q' + Q + ' final');
   assert(sim.deltaAdvance > 20);
   const sin = sim.sinuosity();
   assert(sin < 2.15, 'Q' + Q + ' sin too high: ' + sin);
@@ -103,4 +113,32 @@ assert(Math.abs(vv.velocityAt(0) / 1.2 - 1.5) < 0.08);
 assert(vv.velocityAt(1) / 1.2 < 0.7);
 assert(vv.migrateScaleAt(0.2) > vv.migrateScaleAt(0.9));
 console.log('velocity profile OK up=' + vv.upstreamVelocity.toFixed(2) + ' dn=' + vv.mouthVelocity.toFixed(2));
+
+// Particle fractions only increase toward mouth
+const pSim = new RiverSim({ Q: 600, v: 1.2 });
+pSim.setPath(RiverSim.presetPath(pSim.worldW, pSim.worldH, pSim.oceanH));
+for (let i = 0; i < 200; i++) pSim.advance(1);
+pSim.computeGeom();
+const L = pSim.geom.length;
+let f = 0.1;
+for (let step = 0; step < 40; step++) {
+  const vLoc = pSim.velocityAt(f);
+  const df = (vLoc * 78 * 0.016) / L;
+  assert(df >= 0, 'particle df must be >= 0');
+  f = Math.min(0.999, f + df);
+}
+assert(f > 0.1, 'particle advanced toward mouth');
+
+// Artificial upstream hairpin must be flattened / cut
+const hair = new RiverSim();
+hair.setPath([
+  { x: 1100, y: 200 }, { x: 1100, y: 600 }, { x: 1400, y: 900 },
+  { x: 1100, y: 250 }, // climbs back near source
+  { x: 1100, y: 1400 }, { x: 1100, y: 2500 }
+]);
+hair.pts = hair.enforceDownslopeProgress(hair.pts);
+hair.computeGeom();
+assert(hair.maxUpslopeReversal() <= hair.maxUpslopeAllowance() * 1.05, 'hairpin not flattened');
+assert.strictEqual(hair.hasUpstreamHairpin(), false, 'hairpin still present');
+console.log('particle seaward OK; hairpin flattened rev=' + hair.maxUpslopeReversal().toFixed(1));
 console.log('ALL OK');

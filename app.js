@@ -139,30 +139,35 @@
     const g = sim.geom; if (!g || sim.pts.length < 3) return;
     const L = g.length;
     for (const q of state.particles) {
-      const frac = Math.max(0, Math.min(1, q.f));
-      const loc = locate(q.f * L);
-      // 橫向：上游集中，下游／河口擴散（展現展寬）
+      const frac = Math.max(0, Math.min(0.999, q.f || 0));
+      const loc = locate(frac * L);
+      // 橫向：上游集中，下游／河口擴散
       const spread = 0.55 + 0.9 * Math.pow(frac, 1.4);
       let fac = (1 - 1.2 * loc.cw * q.o) * (1 - 0.3 * q.o * q.o);
       fac = Math.max(0.2, Math.min(2.4, fac));
       const vLoc = sim.velocityAt(frac);
-      // speed 正規化到中游參考，方便畫長短拖尾
       q.speed = (vLoc / Math.max(0.2, sim.v)) * fac;
-      q.f += (vLoc * fac * 78 * dtSec) / L;
+      // 硬規則：只准向河口（f 只增不減）；重置只喺上游重生
+      const df = Math.max(0, (vLoc * fac * 78 * dtSec) / L);
+      q.fPrev = frac;
+      q.f = frac + df;
       if (q.f >= 1) {
-        // 到河口後少數粒子沿分流扇出再重生
-        q.f = Math.random() * 0.12;
+        q.f = Math.random() * 0.08; // 重生喺上游
         q.o = (Math.random() * 2 - 1) * 0.9;
         q.px = null;
+        q.fPrev = q.f;
       }
-      const l2 = locate(Math.min(0.999, q.f) * L);
-      const wLoc = sim.widthAt(Math.min(1, q.f));
-      // 下游橫向偏移加大 → 粒子散開
+      const f2 = Math.min(0.999, q.f);
+      const l2 = locate(f2 * L);
+      const wLoc = sim.widthAt(f2);
       const lat = q.o * wLoc * 0.5 * spread;
       q.lx = q.px; q.ly = q.py;
       q.px = l2.x + l2.nx * lat;
       q.py = l2.y + l2.ny * lat;
-      if (q.py > sim.waterLineY(q.px) - 2) { q.f = Math.random() * 0.35; q.px = null; }
+      // 拖尾方向：沿河道切線向下游（唔跟幾何折返）
+      const idx = Math.min(g.tx.length - 1, Math.max(0, Math.floor(f2 * (g.tx.length - 1))));
+      q.tx = g.tx[idx]; q.ty = g.ty[idx];
+      if (q.py > sim.waterLineY(q.px) - 2) { q.f = Math.random() * 0.2; q.px = null; }
     }
   }
 
@@ -562,19 +567,24 @@
   function drawParticles(c, land) {
     c.save(); c.lineCap = 'round';
     const tipY = land[land.length - 1].y;
+    const s = state.view.s;
     for (const q of state.particles) {
-      if (q.lx == null || q.px == null) continue;
+      if (q.px == null) continue;
       if (q.py > tipY - 8) continue;
       if (q.py > sim.waterLineY(q.px) - 2) continue;
-      const a = toScreen({ x: q.lx, y: q.ly }), b = toScreen({ x: q.px, y: q.py });
-      const dx = b.x - a.x, dy = b.y - a.y;
-      if (dx * dx + dy * dy > 1200) continue;
-      // 上游長亮拖尾；河口短而淡
+      const b = toScreen({ x: q.px, y: q.py });
       const sp = Math.max(0.25, q.speed || 1);
-      const k = 2.2 + sp * 2.4;
+      // 拖尾沿河道切線向下游（tx,ty 指向河口方向）
+      let tx = q.tx || 0, ty = q.ty || 1;
+      const tl = Math.hypot(tx, ty) || 1;
+      tx /= tl; ty /= tl;
+      const len = (6 + sp * 14) * s; // screen px
       c.strokeStyle = `rgba(255,255,255,${0.28 + 0.55 * Math.min(1, sp / 1.8)})`;
       c.lineWidth = 1.0 + sp * 1.05;
-      c.beginPath(); c.moveTo(b.x - dx * k, b.y - dy * k); c.lineTo(b.x, b.y); c.stroke();
+      c.beginPath();
+      c.moveTo(b.x - tx * len, b.y - ty * len);
+      c.lineTo(b.x, b.y);
+      c.stroke();
     }
     c.restore();
   }
