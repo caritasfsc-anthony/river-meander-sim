@@ -83,7 +83,7 @@
 
   function clearHistory() { hctx.clearRect(0, 0, hist.width, hist.height); state.lastHistYear = -99; }
   function stampHistory() {
-    const p = sim.landChannel().filter(q => q.y < sim.coastY(q.x) - 4);
+    const p = sim.landChannel().filter(q => q.y < sim.waterLineY(q.x) - 2);
     if (p.length < 2) return;
     hctx.save(); hctx.scale(1 / RES, 1 / RES);
     hctx.strokeStyle = 'rgba(226,206,150,0.06)';
@@ -92,7 +92,7 @@
     hctx.restore();
   }
   function stampOxbow(o) {
-    const pts = o.pts.filter(q => q.y < sim.coastY(q.x) - 6);
+    const pts = o.pts.filter(q => q.y < sim.waterLineY(q.x) - 4);
     if (pts.length < 4) return;
     hctx.save(); hctx.scale(1 / RES, 1 / RES);
     hctx.strokeStyle = 'rgba(160,150,110,0.4)';
@@ -142,7 +142,7 @@
       q.px = l2.x + l2.nx * q.o * W * 0.5;
       q.py = l2.y + l2.ny * q.o * W * 0.5;
       // 入海即重生喺上游（唔喺海面畫流動）
-      if (q.py > sim.coastY(q.px) - 4) { q.f = Math.random() * 0.7; q.px = null; }
+      if (q.py > sim.waterLineY(q.px) - 2) { q.f = Math.random() * 0.7; q.px = null; }
     }
   }
 
@@ -189,6 +189,12 @@
 
   function channelFrac(i, n) { return n <= 1 ? 0 : i / (n - 1); }
 
+  /** 岸點唔准畫過水線（避免河道多邊形「伸入海」） */
+  function clampLandY(x, y) {
+    const lim = sim.waterLineY(x) - 2;
+    return y > lim ? lim : y;
+  }
+
   /** 沿程變寬河道：用左右岸多邊形繪製 */
   function drawVariableChannel(c, land, g) {
     // 末端略為提早收束，交俾羽流溶入海，避免「河喺海面蜿蜒」
@@ -203,8 +209,10 @@
       // 最後一截逐漸透明感：闊度先略收再交羽流
       if (frac > 0.9) w *= 1 + (frac - 0.9) * 2.5;
       const nx = g.nx[idx] || 0, ny = g.ny[idx] || 1;
-      left.push({ x: land[k].x + nx * w * 0.5, y: land[k].y + ny * w * 0.5 });
-      right.push({ x: land[k].x - nx * w * 0.5, y: land[k].y - ny * w * 0.5 });
+      const lx = land[k].x + nx * w * 0.5, ly = clampLandY(lx, land[k].y + ny * w * 0.5);
+      const rx = land[k].x - nx * w * 0.5, ry = clampLandY(rx, land[k].y - ny * w * 0.5);
+      left.push({ x: lx, y: ly });
+      right.push({ x: rx, y: ry });
     }
     // 河岸
     c.beginPath();
@@ -277,14 +285,13 @@
 
   function drawCoastAndDelta(c) {
     const base = sim.baseCoastY;
-    const step = 18;
-    // 海洋（不規則海岸線以上保留陸地）
+    const step = 14;
+    // 海洋：用水線 waterLineY（同物理截斷），避免河道喺「睇落係海、計落係陸」嘅區域蜿蜒
     c.beginPath();
     c.moveTo(0, WH);
     c.lineTo(WW, WH);
-    c.lineTo(WW, sim.coastY(WW));
-    for (let x = WW; x >= 0; x -= step) c.lineTo(x, sim.coastY(x));
-    c.lineTo(0, WH);
+    c.lineTo(WW, sim.waterLineY(WW));
+    for (let x = WW; x >= 0; x -= step) c.lineTo(x, sim.waterLineY(x));
     c.closePath();
     const sea = c.createLinearGradient(0, base, 0, WH);
     sea.addColorStop(0, '#5aa8d4');
@@ -293,54 +300,42 @@
     c.fillStyle = sea;
     c.fill();
 
-    // 三角洲扇形（沙泥色）
+    // 三角洲沙洲：填滿 baseCoast → waterLine 之間嘅扇形（河道只喺沙洲上，唔喺開闊海）
     if (sim.deltaAdvance > 8 && sim.pts.length) {
       const mx = sim.pts[sim.pts.length - 1].x;
-      const hw = sim.deltaHalfW;
-      const tipY = sim.mouthY;
+      const hw = Math.max(60, sim.deltaHalfW);
       c.beginPath();
-      c.moveTo(mx - hw * 1.05, base - 8);
-      for (let i = 0; i <= 24; i++) {
-        const t = i / 24;
-        const ang = -Math.PI * 0.92 + t * Math.PI * 1.84;
-        const r = hw * (0.55 + 0.45 * Math.sin(t * Math.PI));
-        // 扇形外緣貼近 coastY
-        const x = mx + Math.sin(ang) * r;
-        const y = base + (tipY - base) * Math.pow(Math.cos((t - 0.5) * Math.PI), 1.4);
-        c.lineTo(x, Math.max(base - 5, Math.min(tipY + 10, sim.coastY(x) - 2)));
+      // 沿水線外側走扇緣
+      for (let x = mx - hw; x <= mx + hw; x += step) {
+        const y = sim.waterLineY(x);
+        if (x === mx - hw) c.moveTo(x, base - 6);
+        c.lineTo(x, y);
       }
-      c.lineTo(mx + hw * 1.05, base - 8);
+      c.lineTo(mx + hw, base - 6);
       c.closePath();
+      const tipY = sim.mouthY;
       const sand = c.createLinearGradient(0, base - 20, 0, tipY);
-      sand.addColorStop(0, 'rgba(210,185,130,0.95)');
-      sand.addColorStop(0.55, 'rgba(198,170,110,0.9)');
-      sand.addColorStop(1, 'rgba(170,145,95,0.75)');
+      sand.addColorStop(0, 'rgba(210,185,130,0.97)');
+      sand.addColorStop(0.55, 'rgba(198,170,110,0.92)');
+      sand.addColorStop(1, 'rgba(170,145,95,0.8)');
       c.fillStyle = sand;
       c.fill();
-      c.strokeStyle = 'rgba(160,130,80,0.45)';
-      c.lineWidth = 3;
+      c.strokeStyle = 'rgba(160,130,80,0.4)';
+      c.lineWidth = 2;
       c.stroke();
-
-      // 淡水羽流
-      const plume = c.createRadialGradient(mx, tipY, 10, mx, tipY + 50, hw * 0.9);
-      plume.addColorStop(0, 'rgba(140,190,220,0.5)');
-      plume.addColorStop(1, 'rgba(90,150,200,0)');
-      c.fillStyle = plume;
-      c.beginPath();
-      c.arc(mx, tipY + 30, hw * 0.85, 0, Math.PI * 2);
-      c.fill();
     }
 
-    // 浪紋
+    // 浪紋（只在水線以南）
     c.strokeStyle = 'rgba(255,255,255,0.22)';
     c.lineWidth = 1.4;
     for (let i = 0; i < 5; i++) {
-      const yy = base + sim.deltaAdvance * 0.35 + 30 + i * 28;
+      const yy = base + sim.deltaAdvance * 0.5 + 40 + i * 28;
       if (yy > WH - 10) break;
       c.beginPath();
       for (let x = 0; x <= WW; x += 16) {
         const wave = Math.sin(x * 0.07 + i * 1.2 + sim.year * 0.02) * 3;
-        x === 0 ? c.moveTo(x, yy + wave) : c.lineTo(x, yy + wave);
+        const yl = Math.max(yy + wave, sim.waterLineY(x) + 6);
+        x === 0 ? c.moveTo(x, yl) : c.lineTo(x, yl);
       }
       c.stroke();
     }
@@ -369,7 +364,7 @@
 
   function drawOxbow(c, o) {
     const fade = Math.max(0, 1 - o.age / 1100);
-    const pts = o.pts.filter(q => q.y < sim.coastY(q.x) - 6);
+    const pts = o.pts.filter(q => q.y < sim.waterLineY(q.x) - 4);
     if (fade < 0.05 || pts.length < 4) return;
     const silt = Math.min(1, o.age / 650);
     const w = o.width * (0.95 - 0.45 * silt);
@@ -437,13 +432,18 @@
       const r = ((g.R[i0] || 0) + (g.R[i1] || 0)) / 2;
       const a = Math.abs(r) / Math.max(maxR, 0.25);
       if (a < 0.18) continue;
+      if (land[i].y > sim.waterLineY(land[i].x) - 30) continue;
       const W = sim.widthAt(channelFrac(i, land.length));
       const sgn = -Math.sign(r), off = W / 2 + 6;
+      const x0 = land[i].x + (g.nx[i0] || 0) * sgn * off;
+      const y0 = clampLandY(x0, land[i].y + (g.ny[i0] || 0) * sgn * off);
+      const x1 = land[i + 1].x + (g.nx[i1] || 0) * sgn * off;
+      const y1 = clampLandY(x1, land[i + 1].y + (g.ny[i1] || 0) * sgn * off);
       c.strokeStyle = `rgba(224,83,61,${Math.min(0.95, a)})`;
       c.lineWidth = 6 + 10 * Math.min(1, a);
       c.beginPath();
-      c.moveTo(land[i].x + (g.nx[i0] || 0) * sgn * off, land[i].y + (g.ny[i0] || 0) * sgn * off);
-      c.lineTo(land[i + 1].x + (g.nx[i1] || 0) * sgn * off, land[i + 1].y + (g.ny[i1] || 0) * sgn * off);
+      c.moveTo(x0, y0);
+      c.lineTo(x1, y1);
       c.stroke();
     }
   }
@@ -455,7 +455,7 @@
     for (const q of state.particles) {
       if (q.lx == null || q.px == null) continue;
       if (q.py > tipY - 15) continue; // 入海／羽流區唔畫
-      if (q.py > sim.coastY(q.px) + 5) continue;
+      if (q.py > sim.waterLineY(q.px) - 2) continue;
       const a = toScreen({ x: q.lx, y: q.ly }), b = toScreen({ x: q.px, y: q.py });
       const dx = b.x - a.x, dy = b.y - a.y;
       if (dx * dx + dy * dy > 900) continue;
@@ -492,7 +492,8 @@
       // 只標示仍在陸上河段內的彎
       if (i >= g.cw.length) continue;
       const p = sim.pts[i];
-      if (p.y > sim.coastY(p.x) + 5) continue;
+      // 只標陸上河段；標籤位置若落喺海就跳過
+      if (p.y > sim.waterLineY(p.x) - 40) continue;
       const sign = Math.sign(g.cw[i] || 1);
       const frac = i / Math.max(1, sim.pts.length - 1);
       const W = sim.widthAt(frac);
@@ -502,6 +503,7 @@
       const oL = { x: p.x - g.nx[i] * sign * d * 1.3, y: p.y - g.ny[i] * sign * d * 1.3 };
       const iL = { x: p.x + g.nx[i] * sign * d * 1.3, y: p.y + g.ny[i] * sign * d * 1.3 };
       for (const [aa, bb, t, sub, col] of [[outer, oL, '外彎 · 侵蝕', 'outer bank erosion', '#d2462f'], [inner, iL, '內彎 · 沉積', 'inner bank deposition', '#c08a1e']]) {
+        if (aa.y > sim.waterLineY(aa.x) - 8 || bb.y > sim.waterLineY(bb.x) - 8) continue;
         const A = toScreen(aa), B = toScreen(bb);
         c.strokeStyle = col; c.lineWidth = 2; c.beginPath(); c.moveTo(A.x, A.y); c.lineTo(B.x, B.y); c.stroke();
         c.fillStyle = col; c.beginPath(); c.arc(A.x, A.y, 4, 0, 7); c.fill();
@@ -510,7 +512,9 @@
     }
     for (const o of sim.oxbows) {
       if (o.age > 320) continue;
-      const m = o.pts[Math.floor(o.pts.length / 2)], s = toScreen(m);
+      const m = o.pts[Math.floor(o.pts.length / 2)];
+      if (m.y > sim.waterLineY(m.x) - 20) continue;
+      const s = toScreen(m);
       pill(c, s.x, s.y - 30, '漬水／牛軛湖', 'stagnant oxbow (yr ' + Math.round(o.year) + ')', '#4a5f48');
     }
     if (sim.deltaAdvance > 35 && land.length) {

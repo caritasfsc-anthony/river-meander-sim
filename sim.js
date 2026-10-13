@@ -77,8 +77,9 @@
 
     /** 目前河口／三角洲尖端的大約 y */
     get mouthY() {
-      // 三角洲尖端（沙洲上），唔好伸入遠海
-      return Math.min(this.worldH - 60, this.baseCoastY + this.deltaAdvance * 0.82);
+      if (!this.pts.length) return this.baseCoastY - 4;
+      const x = this.pts[this.pts.length - 1].x;
+      return this.waterLineY(x) - 4;
     }
 
     get baseWidth() { return 3.2 * Math.sqrt(this.Q); }
@@ -146,12 +147,13 @@
       p = resample(p, Math.max(5, this.ds / 3));
       p = chaikin(p, 2);
       p = resample(p, this.ds);
-      this.pts = p;
-      this.initial = p.map(q => ({ x: q.x, y: q.y }));
-      this.sourceAnchor = { x: p[0].x, y: p[0].y };
+      this.pts = this.clipChannelToLand(p);
+      this.initial = this.pts.map(q => ({ x: q.x, y: q.y }));
+      this.sourceAnchor = { x: this.pts[0].x, y: this.pts[0].y };
       this.computeGeom();
-      // 初始自交仍可截彎（教學用），但用較嚴門檻
       this.checkCutoffs(true);
+      this.pts = this.clipChannelToLand(this.pts);
+      this.computeGeom();
       return true;
     }
 
@@ -162,13 +164,13 @@
       this.reset();
       this.initial = init;
       this.sourceAnchor = anchor || { x: init[0].x, y: init[0].y };
-      this.pts = resample(init, this.ds);
+      this.pts = this.clipChannelToLand(resample(init, this.ds));
       this.computeGeom();
     }
 
     onParamChange() {
       if (this.pts.length >= 2) {
-        this.pts = resample(this.pts, this.ds);
+        this.pts = this.clipChannelToLand(resample(this.pts, this.ds));
         this.computeGeom();
       }
     }
@@ -243,7 +245,10 @@
       if (nx < -300) nx = -300 + (nx + 300) * 0.5;
       if (nx > this.worldW + 300) nx = this.worldW + 300 + (nx - this.worldW - 300) * 0.5;
       if (ny < 10) ny = 10;
-      if (ny > this.worldH - 18) ny = this.worldH - 18;
+      // 硬規則：唔准遷入海洋
+      if (this.isOcean(nx, ny, 5)) {
+        ny = this.waterLineY(nx) - 4;
+      }
       return { x: nx, y: ny };
     }
 
@@ -259,7 +264,11 @@
       const sinNow = this.sinuosity();
       const sinDamp = Math.min(1, 3.0 / Math.max(1.2, sinNow));
       for (let i = 0; i < n; i++) {
-        // 近源／近口略為減弱遷移，避免端點堆彎，但唔係硬牆
+        // 已近海／入海嘅節點唔再遷移
+        if (this.isOcean(p[i].x, p[i].y, 15)) {
+          np[i] = { x: p[i].x, y: Math.min(p[i].y, this.waterLineY(p[i].x) - 4) };
+          continue;
+        }
         let taper = 1;
         const frac = i / (n - 1);
         if (frac < 0.06) taper = frac / 0.06;
@@ -272,7 +281,13 @@
         sum += Math.abs(d);
 
         let mx = -g.nx[i] * d, my = -g.ny[i] * d;
-        const c = this.softConfine(p[i].x + mx, p[i].y + my, mx, my);
+        // 唔好遷入海：若下一步入海就截喺岸邊
+        let nx_ = p[i].x + mx, ny_ = p[i].y + my;
+        if (this.isOcean(nx_, ny_, 5)) {
+          ny_ = this.waterLineY(nx_) - 4;
+          mx = 0; my = 0;
+        }
+        const c = this.softConfine(nx_, ny_, mx, my);
         np[i] = c;
       }
 
@@ -285,14 +300,11 @@
         };
       }
 
-      // 河口：跟三角洲尖端（陸側），允許輕微橫漂
+      // 河口：鎖在海岸／三角洲水線內側
       const last = n - 1;
-      const tipX = p[last].x + (np[last].x - p[last].x) * 0.4;
-      const tipY = Math.min(this.mouthY, this.coastY(tipX) - 4);
-      np[last] = {
-        x: tipX,
-        y: p[last].y + (tipY - p[last].y) * Math.min(1, 0.45 * dt + 0.1)
-      };
+      const tipX = p[last].x + (np[last].x - p[last].x) * 0.25;
+      const tipY = this.waterLineY(tipX) - 4;
+      np[last] = { x: tipX, y: tipY };
 
       const a = Math.min(0.05, 0.005 * dt);
       const sm = np.map(q => ({ x: q.x, y: q.y }));
@@ -300,8 +312,11 @@
         sm[i].x += a * (np[i - 1].x + np[i + 1].x - 2 * np[i].x);
         sm[i].y += a * (np[i - 1].y + np[i + 1].y - 2 * np[i].y);
       }
-      // 保持大致由上至下
-      if (sm[0].y > sm[last].y - 100) sm[last].y = sm[0].y + 100;
+      // 保持大致由上至下（但仍鎖在水線內側）
+      if (sm[0].y > sm[last].y - 100) {
+        sm[last].y = Math.min(sm[0].y + 100, this.waterLineY(sm[last].x) - 4);
+      }
+      sm[last].y = Math.min(sm[last].y, this.waterLineY(sm[last].x) - 4);
 
       let nxt = resample(sm, ds);
       if (nxt.length > 420) nxt = resample(sm, ds * (nxt.length / 380));
@@ -325,6 +340,7 @@
       for (const o of this.oxbows) o.age += dt;
       this.oxbows = this.oxbows.filter(o => o.age < 1100 && this.oxbowOnLand(o));
       this.checkCutoffs(false);
+      this.pts = this.clipChannelToLand(this.pts);
       this.computeGeom();
       const rate = meanMig / Math.max(dt, 1e-6);
       this.meanRate = this.meanRate ? this.meanRate * 0.9 + rate * 0.1 : rate;
@@ -346,22 +362,23 @@
     }
 
     oxbowOnLand(o) {
-      // 漬水牛軛湖必須幾乎完全喺陸地上
+      if (!o || !o.pts || o.pts.length < 4) return false;
       let sea = 0;
       for (const q of o.pts) {
-        if (q.y > this.coastY(q.x) - 8) sea++;
+        if (this.isOcean(q.x, q.y, 8)) sea++;
       }
-      return sea < o.pts.length * 0.25;
+      // 任何明顯入海就丟棄（唔准跨海纏結）
+      return sea === 0;
     }
 
-    /** 裁掉伸入海的牛軛湖點 */
+    /** 裁掉伸入海的牛軛湖點：第一個入海點之後全部丟棄 */
     clipOxbowPts(pts) {
-      return pts
-        .map(q => {
-          const cy = this.coastY(q.x) - 10;
-          return { x: q.x, y: Math.min(q.y, cy) };
-        })
-        .filter(q => q.y < this.baseCoastY + this.deltaAdvance * 0.5);
+      const out = [];
+      for (const q of pts) {
+        if (this.isOcean(q.x, q.y, 8)) break;
+        out.push({ x: q.x, y: q.y });
+      }
+      return out;
     }
 
     /**
@@ -389,20 +406,25 @@
 
       let best = null, bestScore = -1;
       for (let i = marginNodes; i < n - marginNodes; i++) {
-        if (p[i].y > this.baseCoastY - 50) continue;
+        if (p[i].y > this.waterLineY(p[i].x) - 120) continue;
         const cx = Math.floor(p[i].x / cell), cy = Math.floor(p[i].y / cell);
         for (let ox = -1; ox <= 1; ox++) for (let oy = -1; oy <= 1; oy++) {
           const list = grid.get(key(cx + ox, cy + oy));
           if (!list) continue;
           for (const j of list) {
             if (j - i < minAlong || j >= n - marginNodes) continue;
-            if (p[j].y > this.baseCoastY - 50) continue;
+            if (p[j].y > this.waterLineY(p[j].x) - 120) continue;
             const d = dist(p[i], p[j]);
             if (d >= thr) continue;
-            const loopLen = polyLength(p.slice(i, j + 1));
+            const loopPts = p.slice(i, j + 1);
+            const loopLen = polyLength(loopPts);
             const loopSin = loopLen / (d || 1);
+            // 只要成熟短彎（新月形），拒絕超長扭曲結
             if (loopSin < (immediate ? 2.0 : 2.4)) continue;
-            const score = loopSin / (d / W + 0.25);
+            if (loopSin > 10) continue;
+            if (loopLen > Math.min(this.worldH * 0.28, W * 22)) continue;
+            // 分數：頸越窄越好，長度適中加分
+            const score = (1 / (d / W + 0.2)) * (loopSin < 5 ? loopSin : (8 - loopSin));
             if (score > bestScore) { bestScore = score; best = [i, j, d, loopSin]; }
           }
         }
@@ -416,7 +438,10 @@
 
       let oxPts = p.slice(i, j + 1).map(q => ({ x: q.x, y: q.y }));
       oxPts = this.clipOxbowPts(oxPts);
-      if (oxPts.length >= 6 && this.oxbowOnLand({ pts: oxPts })) {
+      const oxLen = polyLength(oxPts);
+      // 只要短小新月形，拒絕超長／跨半個地圖嘅扭曲結
+      const maxOx = Math.min(this.worldH * 0.28, W * 22);
+      if (oxPts.length >= 6 && oxLen <= maxOx && this.oxbowOnLand({ pts: oxPts })) {
         this.oxbows.push({ pts: oxPts, age: 0, width: W * 0.9, year: this.year, closed: true });
       }
 
@@ -431,7 +456,7 @@
       }
       let out = resample(np, this.ds);
       if (out.length > 420) out = resample(np, this.ds * (out.length / 380));
-      this.pts = out;
+      this.pts = this.enforceSeawardNearCoast(this.truncateAtCoast(out));
       this.cutoffs++;
       this.events.push({ type: 'cutoff', year: this.year, loopSin, neck: d });
       this.cutoffCooldown = 65;
@@ -440,45 +465,129 @@
       this.computeGeom();
     }
 
+    /** 點是否已入海／到達水線（含緊貼海岸） */
+    isOcean(x, y, margin) {
+      margin = margin == null ? 2 : margin;
+      return y >= this.waterLineY(x) - margin;
+    }
+
     /**
-     * 活躍河道只留在陸地／三角洲上：越过當地海岸線的點拉回岸上。
-     * 河口點放在三角洲尖端，唔再於開闊海面蜿蜒。
+     * 水線：三角洲只在河口附近凸出；遠離河口嘅位置用原始海岸，
+     * 避免河道喺三角洲側翼被當成「陸地」而喺視覺上海面蜿蜒／折返。
      */
-    clipChannelToLand(pts) {
-      if (!pts || pts.length < 2) return pts;
-      const out = pts.map(q => ({ x: q.x, y: q.y }));
-      const n = out.length;
-      for (let i = 0; i < n - 1; i++) {
-        const cy = this.coastY(out[i].x);
-        // 留在海岸／三角洲陸側（略為離水線）
-        if (out[i].y > cy - 6) out[i].y = cy - 6;
+    waterLineY(x) {
+      const base = this.baseCoastY;
+      if (!this.pts.length || this.deltaAdvance < 1) return base;
+      const mx = this.pts[this.pts.length - 1].x;
+      const hw = Math.max(40, this.deltaHalfW * 0.85);
+      const u = Math.abs(x - mx) / hw;
+      if (u >= 1) return base;
+      // 只喺河口扇形內允許三角洲前進
+      const lobe = Math.exp(-u * u * 2.2);
+      return base + this.deltaAdvance * 0.82 * lobe;
+    }
+
+    /**
+     * 硬規則：由上游往下走，第一個碰到海岸／海洋嘅點即為河口。
+     * 之後全部丟棄——唔准繼續、唔准喺水面蜿蜒、唔准折返陸地。
+     */
+    truncateAtCoast(pts) {
+      if (!pts || pts.length < 2) return pts ? pts.slice() : [];
+      const out = [];
+      for (let i = 0; i < pts.length; i++) {
+        const q = { x: pts[i].x, y: pts[i].y };
+        if (this.isOcean(q.x, q.y, 5)) {
+          const cy = this.waterLineY(q.x);
+          out.push({ x: q.x, y: cy - 4 });
+          break;
+        }
+        out.push(q);
       }
-      // 河口：對齊三角洲尖端
-      const tipY = this.mouthY;
-      out[n - 1].y = tipY;
-      // 若尖端仍深過 local coast，貼住 coast（三角洲上）
-      const tipCoast = this.coastY(out[n - 1].x);
-      if (out[n - 1].y > tipCoast + 2) out[n - 1].y = tipCoast;
+      if (out.length < 2) {
+        // 保底：至少保留源到海岸
+        const a = pts[0];
+        const cy = this.coastY(a.x);
+        return [ { x: a.x, y: a.y }, { x: a.x, y: Math.min(cy - 1, a.y + 100) } ];
+      }
+      // 河口對齊水線內側
+      const last = out[out.length - 1];
+      last.y = Math.min(last.y, this.waterLineY(last.x) - 4);
       return out;
     }
 
-    /** 繪圖用：只取仍在陸／三角洲上的活躍河段（唔畫出海面迴圈） */
+    /** @deprecated 用 truncateAtCoast */
+    clipChannelToLand(pts) {
+      return this.enforceSeawardNearCoast(this.truncateAtCoast(pts));
+    }
+
+    /**
+     * 近岸河段只准向海（y 增加），禁止大迴環向北折返（睇落似由海爬返陸地）。
+     */
+    enforceSeawardNearCoast(pts) {
+      if (!pts || pts.length < 3) return pts;
+      const out = pts.map(q => ({ x: q.x, y: q.y }));
+      let i0 = -1;
+      for (let i = 0; i < out.length; i++) {
+        if (out[i].y >= this.waterLineY(out[i].x) - 220) { i0 = i; break; }
+      }
+      if (i0 < 0) return out;
+      let floorY = out[i0].y;
+      for (let i = i0 + 1; i < out.length; i++) {
+        // 允許輕微上下，但唔好大幅向北
+        if (out[i].y < floorY - 35) {
+          // 截斷：近岸折返即視為到達河口
+          out[i].y = Math.min(floorY, this.waterLineY(out[i].x) - 4);
+          return this.truncateAtCoast(out.slice(0, i + 1));
+        }
+        floorY = Math.max(floorY, out[i].y - 10);
+      }
+      return out;
+    }
+
+    /** 繪圖／粒子用：活躍陸上河道（已截斷，唔會入海） */
     landChannel() {
       const p = this.pts;
       if (p.length < 2) return [];
-      const out = [];
-      for (let i = 0; i < p.length; i++) {
-        const cy = this.coastY(p[i].x);
-        // 超過海岸太多＝已入海，截斷
-        if (p[i].y > cy + 12 && i > p.length * 0.5) break;
-        out.push({ x: p[i].x, y: p[i].y, i });
+      // pts 應已截斷；再防禦一次
+      const clipped = this.truncateAtCoast(p);
+      return clipped.map((q, i) => ({ x: q.x, y: q.y, i: Math.min(i, p.length - 1) }));
+    }
+
+    /** 回歸測試：活躍河道唔准有入海點（河口可貼水線） */
+    countOceanPoints(margin) {
+      margin = margin == null ? 5 : margin;
+      let n = 0;
+      for (let i = 0; i < this.pts.length; i++) {
+        const p = this.pts[i];
+        // 河口允許貼在水線內側 6m 內
+        const lim = this.waterLineY(p.x) - (i === this.pts.length - 1 ? 0 : margin);
+        if (p.y > lim) n++;
       }
-      if (out.length < 2) return p.slice(0, Math.min(2, p.length)).map((q, i) => ({ x: q.x, y: q.y, i }));
-      // 確保最後一點喺三角洲尖端
-      const last = out[out.length - 1];
-      const tip = { x: p[p.length - 1].x, y: this.mouthY, i: p.length - 1 };
-      if (Math.hypot(last.x - tip.x, last.y - tip.y) > 8) out.push(tip);
-      return out;
+      return n;
+    }
+
+    /**
+     * 回歸：一旦有點貼近／到達海岸，其後唔准再有點明顯向北折返（入海後爬返陸地）。
+     * 正常截斷後唔應該發生。
+     */
+    hasSeaUTurn() {
+      const p = this.pts;
+      if (p.length < 4) return false;
+      let touchIdx = -1, touchY = 0;
+      for (let i = 0; i < p.length; i++) {
+        if (p[i].y >= this.waterLineY(p[i].x) - 12) { touchIdx = i; touchY = p[i].y; break; }
+      }
+      if (touchIdx < 0) return false;
+      for (let i = touchIdx + 1; i < p.length; i++) {
+        if (p[i].y < touchY - 60) return true;
+      }
+      // 另外：唔准有「入海點」之後仲有陸上點
+      let seenSea = false;
+      for (let i = 0; i < p.length; i++) {
+        if (this.isOcean(p[i].x, p[i].y, 5)) seenSea = true;
+        else if (seenSea) return true;
+      }
+      return false;
     }
 
     /** 海岸線 y(x)：三角洲扇形凸出 */
