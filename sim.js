@@ -106,8 +106,8 @@
       this.omega = -1.05;
       this.gamma = 2.85;          // 稍強滯後 → 開放河曲
       this.lagWidths = 2.2;       // 波長約 10–14×河寬
-      this.baseRate = 22;
-      this.noiseAmp = 0.28;
+      this.baseRate = 24;
+      this.noiseAmp = 0.30;
       this.valleyHalfFrac = 0.32; // 河谷／氾濫原半寬（地圖比例）
       this.ph1 = Math.random() * 6.28;
       this.ph2 = Math.random() * 6.28;
@@ -334,16 +334,25 @@
       const axis = this.valleyAxisX;
       const hw = this.valleyHalfW;
       const out = pts.map(q => ({ x: q.x, y: q.y }));
+      // 只拉「整段河道重心」同越界節點，保留河谷內嘅 S 彎振幅
+      let meanX = 0;
+      for (let i = 0; i < out.length; i++) meanX += out[i].x;
+      meanX /= out.length;
+      const shift = (axis - meanX) * strength * 0.85;
+      // 若整體偏左／右，成條河輕移回中（唔壓扁彎）
+      if (Math.abs(meanX - axis) > hw * 0.15) {
+        for (let i = 0; i < out.length; i++) out[i].x += shift;
+      }
+      // 個別點衝出河谷帶外：再柔和收返
       for (let i = 1; i < out.length - 1; i++) {
         const dx = out[i].x - axis;
         const adx = Math.abs(dx);
-        if (adx <= hw * 0.55) continue;
-        const t = Math.min(1, (adx - hw * 0.55) / (hw * 0.7));
-        out[i].x -= dx * strength * t * t;
+        if (adx <= hw * 0.85) continue;
+        const t = Math.min(1, (adx - hw * 0.85) / (hw * 0.5));
+        out[i].x -= dx * strength * 1.2 * t * t;
       }
-      // 源頭錨亦緩緩回中央
       if (this.sourceAnchor) {
-        this.sourceAnchor.x += (axis - this.sourceAnchor.x) * 0.02;
+        this.sourceAnchor.x += (axis - this.sourceAnchor.x) * 0.04;
       }
       return out;
     }
@@ -422,7 +431,7 @@
 
       let nxt = resample(sm, ds);
       if (nxt.length > 420) nxt = resample(sm, ds * (nxt.length / 380));
-      nxt = this.attractToValley(nxt, 0.1);
+      nxt = this.attractToValley(nxt, 0.12);
       this.pts = this.clipChannelToLand(nxt);
       this.year += dt;
       this.ph1 += (Math.random() - 0.5) * 0.4 * Math.sqrt(dt);
@@ -452,10 +461,10 @@
       this.checkCutoffs(false);
       // 彎曲度過高 → 強制截最大環，保持開放河曲（唔好變意粉）
       let guard = 0;
-      while (this.sinuosity() > 1.95 && guard++ < 5) {
+      while (this.sinuosity() > 2.0 && guard++ < 4) {
         if (!this.forceLargestLoopCutoff()) break;
       }
-      this.pts = this.attractToValley(this.spreadBends(this.clipChannelToLand(this.pts)), 0.06);
+      this.pts = this.attractToValley(this.spreadBends(this.clipChannelToLand(this.pts)), 0.08);
       this.resolveSelfIntersections(4);
       this.computeGeom();
       const rate = meanMig / Math.max(dt, 1e-6);
@@ -898,7 +907,7 @@
       const cx = worldW * 0.5;
       // 示範：中央河谷裡嘅開放 S 彎；波長約 12×典型河寬（~80→960m）
       const lam = Math.max(700, Math.min(1100, (landH - y0) / 2.4));
-      const amp = worldW * 0.11; // 温和振幅，唔掂邊
+      const amp = worldW * 0.13; // 開放 S 彎振幅，仍留喺河谷內
       const n = 200;
       for (let k = 0; k <= n; k++) {
         const t = k / n;
