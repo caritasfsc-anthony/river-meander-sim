@@ -103,11 +103,12 @@
       this.oceanH = opts.oceanH || 480;    // 更大海洋帶，方便三角洲前進
       this.Q = opts.Q || 600;
       this.v = opts.v || 1.2;
-      this.omega = -1.0;
-      this.gamma = 2.5;
-      this.lagWidths = 1.5;
-      this.baseRate = 18;
-      this.noiseAmp = 0.15;
+      this.omega = -1.05;
+      this.gamma = 2.85;          // 稍強滯後 → 開放河曲
+      this.lagWidths = 2.2;       // 波長約 10–14×河寬
+      this.baseRate = 22;
+      this.noiseAmp = 0.28;
+      this.valleyHalfFrac = 0.32; // 河谷／氾濫原半寬（地圖比例）
       this.ph1 = Math.random() * 6.28;
       this.ph2 = Math.random() * 6.28;
       this.widenScale = 0.05;
@@ -119,6 +120,15 @@
 
     /** 原始海岸線 y（三角洲由此向海推進） */
     get baseCoastY() { return this.worldH - this.oceanH; }
+
+    /** 河谷中軸（氾濫原中央） */
+    get valleyAxisX() { return this.worldW * 0.5; }
+
+    /** 河谷／活躍河曲帶半寬 */
+    get valleyHalfW() { return this.worldW * (this.valleyHalfFrac || 0.32); }
+
+    /** 目標河曲波長（米）≈ 12 × 中游河寬 */
+    get meanderWavelength() { return Math.max(280, this.width * 12); }
 
     /** 目前河口／三角洲尖端的大約 y */
     get mouthY() {
@@ -205,6 +215,10 @@
       this.pts = this.clipChannelToLand(p);
       this.initial = this.pts.map(q => ({ x: q.x, y: q.y }));
       this.sourceAnchor = { x: this.pts[0].x, y: this.pts[0].y };
+      // 示範／畫河：源頭若太偏邊，輕輕移入河谷
+      if (Math.abs(this.sourceAnchor.x - this.valleyAxisX) > this.valleyHalfW) {
+        this.sourceAnchor.x = this.valleyAxisX + Math.sign(this.sourceAnchor.x - this.valleyAxisX) * this.valleyHalfW * 0.6;
+      }
       this.computeGeom();
       this.resolveSelfIntersections(12);
       this.checkCutoffs(true);
@@ -273,8 +287,12 @@
         for (let k = 1; k <= K && i - k >= 0; k++) { acc += cw[i - k] * wts[k - 1]; ws += wts[k - 1]; }
         const lag = ws > 0 ? acc / ws : cw[i];
         R[i] = this.omega * cw[i] + this.gamma * lag;
-        R[i] += this.noiseAmp * Math.sin(2 * Math.PI * s[i] / (12 * W) + this.ph1)
-          * Math.sin(2 * Math.PI * s[i] / (37 * W) + this.ph2);
+        const lam = this.meanderWavelength;
+        // 主導波 + 次諧波：鼓勵規則開放 S 彎，而非碎雜訊
+        R[i] += this.noiseAmp * Math.sin(2 * Math.PI * s[i] / lam + this.ph1);
+        R[i] += this.noiseAmp * 0.35 * Math.sin(2 * Math.PI * s[i] / (lam * 0.55) + this.ph2);
+        // 彎曲度過低時加一點擾動，避免變直尺
+        if (this.sinuosity() < 1.32) R[i] *= 1.35;
       }
       this.geom = { tx, ty, nx, ny, cw, R, s, length: n ? s[n - 1] : 0 };
       return this.geom;
@@ -285,27 +303,49 @@
      * 只在遠超出可見區（約 ±350 m）時輕輕拉回，避免數值失控。
      */
     softConfine(x, y, mx, my) {
-      // 視圖邊框不是牆。可見區內自由；僅當位移指向界外時減弱該分量。
+      // 視圖邊框唔係硬牆；但河谷帶外柔和拉回中軸
       let nx = x, ny = y;
-      const band = 120;
-      // 左緣：若向左移出，按接近程度減弱
-      if (x < band && mx < 0) {
-        const t = Math.max(0, x / band);
-        nx = (x - mx) + mx * (0.2 + 0.8 * t);
+      const axis = this.valleyAxisX;
+      const hw = this.valleyHalfW;
+      const edge = this.worldW * 0.1;
+      // 靠近地圖左／右 10%：強烈拉向河谷
+      if (nx < edge) nx += (edge - nx) * 0.55;
+      if (nx > this.worldW - edge) nx -= (nx - (this.worldW - edge)) * 0.55;
+      // 河谷帶外：柔和吸向中軸（唔彈牆）
+      const dx = nx - axis;
+      if (Math.abs(dx) > hw * 0.72) {
+        const over = Math.abs(dx) - hw * 0.72;
+        nx -= Math.sign(dx) * over * 0.28;
       }
-      if (x > this.worldW - band && mx > 0) {
-        const t = Math.max(0, (this.worldW - x) / band);
-        nx = (x - mx) + mx * (0.2 + 0.8 * t);
-      }
-      // 遠出可見區外才拉回（防數值失控）
-      if (nx < -300) nx = -300 + (nx + 300) * 0.5;
-      if (nx > this.worldW + 300) nx = this.worldW + 300 + (nx - this.worldW - 300) * 0.5;
+      // 遠出可見區外才硬拉（防數值失控）
+      if (nx < -200) nx = -200 + (nx + 200) * 0.5;
+      if (nx > this.worldW + 200) nx = this.worldW + 200 + (nx - this.worldW - 200) * 0.5;
       if (ny < 10) ny = 10;
-      // 硬規則：唔准遷入海洋
       if (this.isOcean(nx, ny, 5)) {
         ny = this.waterLineY(nx) - 4;
       }
       return { x: nx, y: ny };
+    }
+
+    /** 每步將偏離河谷嘅節點輕輕吸回中軸 */
+    attractToValley(pts, strength) {
+      strength = strength == null ? 0.08 : strength;
+      if (!pts || pts.length < 3) return pts;
+      const axis = this.valleyAxisX;
+      const hw = this.valleyHalfW;
+      const out = pts.map(q => ({ x: q.x, y: q.y }));
+      for (let i = 1; i < out.length - 1; i++) {
+        const dx = out[i].x - axis;
+        const adx = Math.abs(dx);
+        if (adx <= hw * 0.55) continue;
+        const t = Math.min(1, (adx - hw * 0.55) / (hw * 0.7));
+        out[i].x -= dx * strength * t * t;
+      }
+      // 源頭錨亦緩緩回中央
+      if (this.sourceAnchor) {
+        this.sourceAnchor.x += (axis - this.sourceAnchor.x) * 0.02;
+      }
+      return out;
     }
 
     step(dt) {
@@ -318,8 +358,11 @@
       const np = new Array(n);
 
       const sinNow = this.sinuosity();
-      // 高彎曲度時大幅減速，避免未截彎前已打成結
-      const sinDamp = Math.min(1, 1.85 / Math.max(1.15, sinNow));
+      // 目標教學彎曲度 ~1.3–1.8：偏低加速、偏高減速
+      let sinDamp = 1;
+      if (sinNow < 1.32) sinDamp = 1.45;
+      else if (sinNow > 1.85) sinDamp = Math.min(1, 1.7 / sinNow);
+      else sinDamp = 1.0;
       for (let i = 0; i < n; i++) {
         // 已近海／入海嘅節點唔再遷移
         if (this.isOcean(p[i].x, p[i].y, 15)) {
@@ -333,9 +376,9 @@
         taper = Math.max(0.05, taper);
 
         // 局部曲率過大時再減速（防止單彎纏過鄰彎）
-        const curvDamp = 1 / (1 + Math.abs(g.cw[i] || 0) * 2.2);
-        let d = E * g.R[i] * dt * taper * (0.45 + 0.55 * sinDamp) * curvDamp;
-        const lim = 0.16 * ds;
+        const curvDamp = 1 / (1 + Math.abs(g.cw[i] || 0) * 1.6);
+        let d = E * g.R[i] * dt * taper * (0.5 + 0.5 * sinDamp) * curvDamp;
+        const lim = 0.18 * ds;
         if (d > lim) d = lim; else if (d < -lim) d = -lim;
         sum += Math.abs(d);
 
@@ -379,6 +422,7 @@
 
       let nxt = resample(sm, ds);
       if (nxt.length > 420) nxt = resample(sm, ds * (nxt.length / 380));
+      nxt = this.attractToValley(nxt, 0.1);
       this.pts = this.clipChannelToLand(nxt);
       this.year += dt;
       this.ph1 += (Math.random() - 0.5) * 0.4 * Math.sqrt(dt);
@@ -397,16 +441,21 @@
       this.deltaAdvance += (targetAdv - this.deltaAdvance) * Math.min(1, 0.15 * dt);
 
       for (const o of this.oxbows) o.age += dt;
-      this.oxbows = this.oxbows.filter(o => o.age < 1100 && this.oxbowOnLand(o));
+      this.oxbows = this.oxbows.filter(o => o.age < 700 && this.oxbowOnLand(o));
+      // 最多保留 4 個清晰牛軛湖
+      if (this.oxbows.length > 4) {
+        this.oxbows.sort((a, b) => a.age - b.age);
+        this.oxbows = this.oxbows.slice(0, 4);
+      }
       // 每步：先清自交，再做鄰近曲流頸截彎；活躍河道必須係簡單曲線
       this.resolveSelfIntersections(8);
       this.checkCutoffs(false);
       // 彎曲度過高 → 強制截最大環，保持開放河曲（唔好變意粉）
       let guard = 0;
-      while (this.sinuosity() > 2.15 && guard++ < 6) {
+      while (this.sinuosity() > 1.95 && guard++ < 5) {
         if (!this.forceLargestLoopCutoff()) break;
       }
-      this.pts = this.spreadBends(this.clipChannelToLand(this.pts));
+      this.pts = this.attractToValley(this.spreadBends(this.clipChannelToLand(this.pts)), 0.06);
       this.resolveSelfIntersections(4);
       this.computeGeom();
       const rate = meanMig / Math.max(dt, 1e-6);
@@ -465,7 +514,7 @@
       let oxPts = p.slice(i, j + 1).map(q => ({ x: q.x, y: q.y }));
       oxPts = this.clipOxbowPts(oxPts);
       const oxLen = polyLength(oxPts);
-      const maxOx = Math.min(this.worldH * 0.35, W * 28);
+      const maxOx = Math.min(this.worldH * 0.22, W * 18);
       // 自交強制截：即使環路較長都保留（截短至 maxOx）
       if (oxPts.length >= 4) {
         if (oxLen > maxOx) {
@@ -545,14 +594,20 @@
       if (!pts || pts.length < 8) return pts;
       const out = pts.map(q => ({ x: q.x, y: q.y }));
       const W = this.width;
-      const minSep = W * 1.6;
-      const minAlong = Math.max(4, Math.ceil((3.5 * W) / this.ds));
+      const minSep = W * 1.85;
+      const targetAlong = this.meanderWavelength * 0.45; // 相鄰彎頂約半波長
+      const minAlong = Math.max(4, Math.ceil((3.2 * W) / this.ds));
+      // 弧長
+      const S = new Float64Array(out.length);
+      for (let i = 1; i < out.length; i++) S[i] = S[i - 1] + dist(out[i - 1], out[i]);
       for (let i = 2; i < out.length - 2; i++) {
         for (let j = i + minAlong; j < out.length - 1; j++) {
           const d = dist(out[i], out[j]);
           if (d >= minSep || d < 1e-6) continue;
-          // 太近但未到截彎閾值：輕輕推開
-          const push = (minSep - d) * 0.12;
+          const along = S[j] - S[i];
+          // 沿程太近嘅彎：側向推開；沿程接近半波長則少干預
+          const alongFac = along < targetAlong * 0.55 ? 1.0 : 0.35;
+          const push = (minSep - d) * 0.14 * alongFac;
           const ux = (out[j].x - out[i].x) / d;
           const uy = (out[j].y - out[i].y) / d;
           out[i].x -= ux * push * 0.5;
@@ -788,23 +843,23 @@
 
     /** 分流河道（教學用 2–3 支） */
     distributaries() {
-      if (this.deltaAdvance < 20 || this.pts.length < 2) return [];
+      if (this.deltaAdvance < 25 || this.pts.length < 2) return [];
       const mouth = this.pts[this.pts.length - 1];
       const adv = this.deltaAdvance;
       const hw = this.deltaHalfW;
       const arms = [];
-      const angles = [-0.5, 0.0, 0.5];
-      const nArms = adv > 80 ? 3 : 2;
+      const angles = [-0.42, 0.05, 0.48];
+      const nArms = adv > 90 ? 3 : 2;
       for (let a = 0; a < nArms; a++) {
         const ang = angles[a];
-        const len = Math.min(adv * 0.7, adv - 5) * (a === 1 ? 1.0 : 0.75);
-        const tipX = mouth.x + Math.sin(ang) * hw * 0.5;
-        let tipY = mouth.y + Math.max(12, len * 0.55);
-        // 尖端停在海岸線附近，唔伸入遠海
-        tipY = Math.min(tipY, this.coastY(tipX) + 4);
+        const len = Math.min(adv * 0.55, adv - 8) * (a === 1 ? 0.95 : 0.7);
+        const tipX = mouth.x + Math.sin(ang) * hw * 0.42;
+        // 只喺三角洲沙洲上：尖端 ≤ 該處水線
+        let tipY = mouth.y + Math.max(10, len * 0.5);
+        tipY = Math.min(tipY, this.waterLineY(tipX) - 2);
         const mid = {
-          x: mouth.x + Math.sin(ang) * hw * 0.22,
-          y: mouth.y + (tipY - mouth.y) * 0.45
+          x: mouth.x + Math.sin(ang) * hw * 0.18,
+          y: Math.min(mouth.y + (tipY - mouth.y) * 0.45, this.waterLineY(mouth.x + Math.sin(ang) * hw * 0.18) - 2)
         };
         arms.push([{ x: mouth.x, y: mouth.y }, mid, { x: tipX, y: tipY }]);
       }
@@ -839,18 +894,34 @@
       oceanH = oceanH == null ? 480 : oceanH;
       const landH = worldH - oceanH;
       const pts = [];
-      const y0 = worldH * 0.05, y1 = landH - 15;
+      const y0 = worldH * 0.06, y1 = landH - 18;
       const cx = worldW * 0.5;
-      for (let k = 0; k <= 220; k++) {
-        const t = k / 220;
+      // 示範：中央河谷裡嘅開放 S 彎；波長約 12×典型河寬（~80→960m）
+      const lam = Math.max(700, Math.min(1100, (landH - y0) / 2.4));
+      const amp = worldW * 0.11; // 温和振幅，唔掂邊
+      const n = 200;
+      for (let k = 0; k <= n; k++) {
+        const t = k / n;
         const y = y0 + (y1 - y0) * t;
-        const env = Math.sin(Math.PI * t);
+        const along = (y - y0);
+        const env = Math.sin(Math.PI * Math.min(1, Math.max(0, (t - 0.04) / 0.92)));
         const x = cx
-          + worldW * 0.14 * env * Math.sin(2 * Math.PI * t * 2.6 + 0.35)
-          + worldW * 0.035 * Math.sin(2 * Math.PI * t * 5.5);
+          + amp * env * Math.sin(2 * Math.PI * along / lam + 0.4)
+          + amp * 0.22 * env * Math.sin(2 * Math.PI * along / (lam * 0.5) + 1.1);
         pts.push({ x, y });
       }
       return pts;
+    }
+
+    /** 活躍河道 x 分佈統計（測試用） */
+    channelXStats() {
+      const xs = this.pts.map(p => p.x);
+      if (!xs.length) return { mean: this.valleyAxisX, fracLeft10: 0, fracRight10: 0 };
+      const mean = xs.reduce((a, b) => a + b, 0) / xs.length;
+      const edge = this.worldW * 0.1;
+      let L = 0, R = 0;
+      for (const x of xs) { if (x < edge) L++; if (x > this.worldW - edge) R++; }
+      return { mean, fracLeft10: L / xs.length, fracRight10: R / xs.length };
     }
   }
 

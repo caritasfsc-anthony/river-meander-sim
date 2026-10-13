@@ -85,18 +85,26 @@
   function stampHistory() {
     const p = sim.landChannel().filter(q => q.y < sim.waterLineY(q.x) - 2);
     if (p.length < 2) return;
+    // 舊痕跡極淡：唔搶眼
     hctx.save(); hctx.scale(1 / RES, 1 / RES);
-    hctx.strokeStyle = 'rgba(226,206,150,0.06)';
-    hctx.lineWidth = sim.width * 1.0; hctx.lineCap = 'round'; hctx.lineJoin = 'round';
+    hctx.globalAlpha = 0.55;
+    hctx.strokeStyle = 'rgba(210,195,140,0.028)';
+    hctx.lineWidth = sim.width * 0.55; hctx.lineCap = 'round'; hctx.lineJoin = 'round';
     pathOf(hctx, p); hctx.stroke();
+    hctx.restore();
+    // 輕微整體淡化，令舊痕自然消退
+    hctx.save();
+    hctx.globalCompositeOperation = 'destination-out';
+    hctx.fillStyle = 'rgba(0,0,0,0.04)';
+    hctx.fillRect(0, 0, hist.width, hist.height);
     hctx.restore();
   }
   function stampOxbow(o) {
     const pts = o.pts.filter(q => q.y < sim.waterLineY(q.x) - 4);
     if (pts.length < 4) return;
     hctx.save(); hctx.scale(1 / RES, 1 / RES);
-    hctx.strokeStyle = 'rgba(160,150,110,0.4)';
-    hctx.lineWidth = o.width * 0.9; hctx.lineCap = 'round'; hctx.lineJoin = 'round';
+    hctx.strokeStyle = 'rgba(150,145,110,0.18)';
+    hctx.lineWidth = o.width * 0.55; hctx.lineCap = 'round'; hctx.lineJoin = 'round';
     pathOf(hctx, pts); hctx.stroke(); hctx.restore();
   }
   function pathOf(c, p) { c.beginPath(); c.moveTo(p[0].x, p[0].y); for (let i = 1; i < p.length; i++) c.lineTo(p[i].x, p[i].y); }
@@ -361,28 +369,52 @@
     c.fillStyle = sea;
     c.fill();
 
-    // 三角洲沙洲：填滿 baseCoast → waterLine 之間嘅扇形（河道只喺沙洲上，唔喺開闊海）
+    // 三角洲沙洲：可讀嘅扇葉（河道只喺沙洲上）
     if (sim.deltaAdvance > 8 && sim.pts.length) {
       const mx = sim.pts[sim.pts.length - 1].x;
-      const hw = Math.max(60, sim.deltaHalfW);
-      c.beginPath();
-      // 沿水線外側走扇緣
-      for (let x = mx - hw; x <= mx + hw; x += step) {
-        const y = sim.waterLineY(x);
-        if (x === mx - hw) c.moveTo(x, base - 6);
-        c.lineTo(x, y);
-      }
-      c.lineTo(mx + hw, base - 6);
-      c.closePath();
+      const hw = Math.max(70, sim.deltaHalfW);
       const tipY = sim.mouthY;
-      const sand = c.createLinearGradient(0, base - 20, 0, tipY);
-      sand.addColorStop(0, 'rgba(210,185,130,0.97)');
-      sand.addColorStop(0.55, 'rgba(198,170,110,0.92)');
-      sand.addColorStop(1, 'rgba(170,145,95,0.8)');
+      // 主扇
+      c.beginPath();
+      c.moveTo(mx - hw * 0.95, base - 8);
+      for (let x = mx - hw; x <= mx + hw; x += step) {
+        const u = (x - mx) / hw;
+        const lobe = Math.exp(-u * u * 1.6);
+        const y = base + (tipY - base) * lobe * 0.92 + Math.sin(u * 7) * 4 * lobe;
+        c.lineTo(x, Math.min(y, sim.waterLineY(x)));
+      }
+      c.lineTo(mx + hw * 0.95, base - 8);
+      c.closePath();
+      const sand = c.createLinearGradient(mx, base - 30, mx, tipY + 10);
+      sand.addColorStop(0, 'rgba(218,192,138,0.98)');
+      sand.addColorStop(0.5, 'rgba(205,178,118,0.95)');
+      sand.addColorStop(1, 'rgba(175,148,95,0.78)');
       c.fillStyle = sand;
       c.fill();
-      c.strokeStyle = 'rgba(160,130,80,0.4)';
-      c.lineWidth = 2;
+      // 次級沙嘴（左右小葉）
+      for (const side of [-1, 1]) {
+        const cx = mx + side * hw * 0.45;
+        const subW = hw * 0.38;
+        c.beginPath();
+        c.moveTo(cx - subW, base - 4);
+        for (let x = cx - subW; x <= cx + subW; x += step) {
+          const u = (x - cx) / subW;
+          const lobe = Math.exp(-u * u * 2.2);
+          const y = base + sim.deltaAdvance * 0.45 * lobe;
+          c.lineTo(x, Math.min(y, sim.waterLineY(x) - 1));
+        }
+        c.lineTo(cx + subW, base - 4);
+        c.closePath();
+        c.fillStyle = 'rgba(200,172,112,0.7)';
+        c.fill();
+      }
+      c.strokeStyle = 'rgba(150,120,70,0.45)';
+      c.lineWidth = 2.2;
+      c.beginPath();
+      for (let x = mx - hw; x <= mx + hw; x += step) {
+        const y = sim.waterLineY(x);
+        x === mx - hw ? c.moveTo(x, y) : c.lineTo(x, y);
+      }
       c.stroke();
     }
 
@@ -405,7 +437,7 @@
   function drawDistributaries(c) {
     const arms = sim.distributaries();
     if (!arms.length) return;
-    const w0 = Math.max(8, sim.mouthWidth * 0.28);
+    const w0 = Math.max(6, sim.mouthWidth * 0.2);
     c.lineCap = 'round'; c.lineJoin = 'round';
     for (const arm of arms) {
       // 越近尖端越窄、越淡 → 溶入海
@@ -424,14 +456,14 @@
   }
 
   function drawOxbow(c, o) {
-    const fade = Math.max(0, 1 - o.age / 1100);
+    const fade = Math.max(0, 1 - o.age / 700);
     const pts = o.pts.filter(q => q.y < sim.waterLineY(q.x) - 4);
-    if (fade < 0.05 || pts.length < 4) return;
-    const silt = Math.min(1, o.age / 650);
-    const w = o.width * (0.95 - 0.45 * silt);
+    if (fade < 0.08 || pts.length < 4) return;
+    const silt = Math.min(1, o.age / 500);
+    const w = o.width * (0.85 - 0.4 * silt);
     c.lineCap = 'round'; c.lineJoin = 'round';
-    c.strokeStyle = `rgba(180,165,120,${0.75 * fade})`;
-    c.lineWidth = w + 10;
+    c.strokeStyle = `rgba(170,158,115,${0.45 * fade})`;
+    c.lineWidth = w + 6;
     pathOf(c, pts); c.stroke();
     const r = Math.round(70 + silt * 55);
     const gg = Math.round(95 + silt * 25);
@@ -710,7 +742,7 @@
     const dt = Math.min(0.1, (now - state.lastT) / 1000); state.lastT = now;
     if (state.running && sim.pts.length >= 3) {
       sim.advance(state.timeSpeed * dt);
-      if (sim.year - state.lastHistYear >= 3) { stampHistory(); state.lastHistYear = sim.year; }
+      if (sim.year - state.lastHistYear >= 10) { stampHistory(); state.lastHistYear = sim.year; }
       if (sim.cutoffs > state.lastCutoffs) {
         for (let k = state.lastCutoffs; k < sim.cutoffs; k++) {
           const o = sim.oxbows[sim.oxbows.length - (sim.cutoffs - k)]; if (o) stampOxbow(o);
