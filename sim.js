@@ -147,23 +147,62 @@
       return base + extra;
     }
 
-    /** 沿程河寬：上游較窄 → 河口明顯加闊（河口喇叭口） */
+    /**
+     * 沿程河寬：上游窄、中游參考、下游／河口明顯展寬（凹形縱剖面配套）。
+     * 最後 25–30% 加速喇叭口，河口約 1.7–1.9× 中游。
+     */
     widthAt(frac) {
       const mid = this.width;
-      const up = mid * 0.72;
-      const mouth = mid * 1.35; // 河口略闊，但唔好闊到岸線自疊成結
+      const up = mid * 0.68;
+      const mouth = mid * 1.85;
       const t = Math.max(0, Math.min(1, frac));
-      const ease = t * t * (3 - 2 * t);
-      return up + (mouth - up) * (0.3 * t + 0.7 * ease);
+      // 前 70% 緩慢加闊；後 30% 急劇展寬
+      let w;
+      if (t < 0.7) {
+        const u = t / 0.7;
+        const ease = u * u * (3 - 2 * u);
+        w = up + (mid - up) * (0.35 + 0.65 * ease);
+      } else {
+        const u = (t - 0.7) / 0.3;
+        const ease = u * u * (3 - 2 * u);
+        w = mid + (mouth - mid) * ease;
+      }
+      return w;
     }
+
+    /**
+     * 沿程流速（凹形縱剖面）：滑桿 = 中游參考流速。
+     * 上游 ~1.5×，下游／河口 ~0.55–0.65×。
+     */
+    velocityAt(frac) {
+      const t = Math.max(0, Math.min(1, frac));
+      // 平滑：上游快 → 中游 1× → 河口慢
+      // factor(0)≈1.5, factor(0.5)≈1.0, factor(1)≈0.58
+      const up = 1.5, mid = 1.0, dn = 0.58;
+      let fac;
+      if (t < 0.45) {
+        const u = t / 0.45;
+        fac = up + (mid - up) * (u * u * (3 - 2 * u));
+      } else {
+        const u = (t - 0.45) / 0.55;
+        fac = mid + (dn - mid) * (u * u * (3 - 2 * u));
+      }
+      return this.v * fac;
+    }
+
+    get upstreamVelocity() { return this.velocityAt(0.05); }
+    get midVelocity() { return this.v; }
+    get mouthVelocity() { return this.velocityAt(0.95); }
 
     /** 局部河寬：受曲率半徑限制，避免河岸多邊形喺急彎自疊 */
     localDrawWidth(frac, curv) {
       let w = this.widthAt(frac);
       const c = Math.abs(curv || 0);
       if (c > 1e-4) {
-        const R = 1 / c; // 約略曲率半徑（米）
-        w = Math.min(w, Math.max(this.upstreamWidth * 0.6, R * 1.1));
+        const R = 1 / c;
+        // 下游允許更闊：曲率限制放寬
+        const relax = frac > 0.7 ? 1.45 : 1.1;
+        w = Math.min(w, Math.max(this.upstreamWidth * 0.55, R * relax));
       }
       return w;
     }
@@ -175,6 +214,15 @@
     get ds() { return Math.max(22, this.baseWidth * 0.42); }
     get erodibility() {
       return this.baseRate * Math.pow(this.v / 1.2, 1.5) * Math.pow(this.Q / 600, 0.5);
+    }
+    /** 沿程侵蝕／遷移倍率：上游－中游高，下游低（配合流速下降→沉積） */
+    migrateScaleAt(frac) {
+      const t = Math.max(0, Math.min(1, frac));
+      const vFac = this.velocityAt(t) / Math.max(0.2, this.v);
+      // 遷移 ∝ 流速^1.2；下游再壓低
+      let m = Math.pow(vFac, 1.2);
+      if (t > 0.75) m *= 0.55 + 0.45 * (1 - (t - 0.75) / 0.25);
+      return Math.max(0.2, Math.min(1.8, m));
     }
     get widenRatio() { return this.width / this.baseWidth; }
 
@@ -384,9 +432,10 @@
         else if (frac > 0.92) taper = (1 - frac) / 0.08;
         taper = Math.max(0.05, taper);
 
-        // 局部曲率過大時再減速（防止單彎纏過鄰彎）
+        // 局部曲率過大時再減速；沿程流速調遷移（上游快／下游慢）
         const curvDamp = 1 / (1 + Math.abs(g.cw[i] || 0) * 1.6);
-        let d = E * g.R[i] * dt * taper * (0.5 + 0.5 * sinDamp) * curvDamp;
+        const vScale = this.migrateScaleAt(frac);
+        let d = E * g.R[i] * dt * taper * (0.5 + 0.5 * sinDamp) * curvDamp * vScale;
         const lim = 0.18 * ds;
         if (d > lim) d = lim; else if (d < -lim) d = -lim;
         sum += Math.abs(d);
@@ -852,23 +901,23 @@
 
     /** 分流河道（教學用 2–3 支） */
     distributaries() {
-      if (this.deltaAdvance < 25 || this.pts.length < 2) return [];
+      if (this.deltaAdvance < 18 || this.pts.length < 2) return [];
       const mouth = this.pts[this.pts.length - 1];
       const adv = this.deltaAdvance;
-      const hw = this.deltaHalfW;
+      const hw = Math.max(this.deltaHalfW, this.mouthWidth * 1.8);
       const arms = [];
-      const angles = [-0.42, 0.05, 0.48];
-      const nArms = adv > 90 ? 3 : 2;
+      const angles = [-0.55, 0.0, 0.55];
+      const nArms = 3;
       for (let a = 0; a < nArms; a++) {
         const ang = angles[a];
-        const len = Math.min(adv * 0.55, adv - 8) * (a === 1 ? 0.95 : 0.7);
-        const tipX = mouth.x + Math.sin(ang) * hw * 0.42;
-        // 只喺三角洲沙洲上：尖端 ≤ 該處水線
-        let tipY = mouth.y + Math.max(10, len * 0.5);
-        tipY = Math.min(tipY, this.waterLineY(tipX) - 2);
+        const len = Math.min(adv * 0.7, adv - 4) * (a === 1 ? 1.05 : 0.82);
+        const tipX = mouth.x + Math.sin(ang) * hw * 0.55;
+        let tipY = mouth.y + Math.max(14, len * 0.62);
+        tipY = Math.min(tipY, this.waterLineY(tipX) - 1);
+        const midX = mouth.x + Math.sin(ang) * hw * 0.28;
         const mid = {
-          x: mouth.x + Math.sin(ang) * hw * 0.18,
-          y: Math.min(mouth.y + (tipY - mouth.y) * 0.45, this.waterLineY(mouth.x + Math.sin(ang) * hw * 0.18) - 2)
+          x: midX,
+          y: Math.min(mouth.y + (tipY - mouth.y) * 0.42, this.waterLineY(midX) - 2)
         };
         arms.push([{ x: mouth.x, y: mouth.y }, mid, { x: tipX, y: tipY }]);
       }

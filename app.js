@@ -137,20 +137,32 @@
   }
   function updateParticles(dtSec) {
     const g = sim.geom; if (!g || sim.pts.length < 3) return;
-    const L = g.length, W = sim.width;
+    const L = g.length;
     for (const q of state.particles) {
+      const frac = Math.max(0, Math.min(1, q.f));
       const loc = locate(q.f * L);
-      let fac = (1 - 1.6 * loc.cw * q.o) * (1 - 0.35 * q.o * q.o);
-      fac = Math.max(0.25, Math.min(2.2, fac));
-      q.speed = fac;
-      q.f += (sim.v * fac * 70 * dtSec) / L;
-      if (q.f >= 1) { q.f -= 1; q.o = (Math.random() * 2 - 1) * 0.85; q.px = null; }
-      const l2 = locate(q.f * L);
+      // 橫向：上游集中，下游／河口擴散（展現展寬）
+      const spread = 0.55 + 0.9 * Math.pow(frac, 1.4);
+      let fac = (1 - 1.2 * loc.cw * q.o) * (1 - 0.3 * q.o * q.o);
+      fac = Math.max(0.2, Math.min(2.4, fac));
+      const vLoc = sim.velocityAt(frac);
+      // speed 正規化到中游參考，方便畫長短拖尾
+      q.speed = (vLoc / Math.max(0.2, sim.v)) * fac;
+      q.f += (vLoc * fac * 78 * dtSec) / L;
+      if (q.f >= 1) {
+        // 到河口後少數粒子沿分流扇出再重生
+        q.f = Math.random() * 0.12;
+        q.o = (Math.random() * 2 - 1) * 0.9;
+        q.px = null;
+      }
+      const l2 = locate(Math.min(0.999, q.f) * L);
+      const wLoc = sim.widthAt(Math.min(1, q.f));
+      // 下游橫向偏移加大 → 粒子散開
+      const lat = q.o * wLoc * 0.5 * spread;
       q.lx = q.px; q.ly = q.py;
-      q.px = l2.x + l2.nx * q.o * W * 0.5;
-      q.py = l2.y + l2.ny * q.o * W * 0.5;
-      // 入海即重生喺上游（唔喺海面畫流動）
-      if (q.py > sim.waterLineY(q.px) - 2) { q.f = Math.random() * 0.7; q.px = null; }
+      q.px = l2.x + l2.nx * lat;
+      q.py = l2.y + l2.ny * lat;
+      if (q.py > sim.waterLineY(q.px) - 2) { q.f = Math.random() * 0.35; q.px = null; }
     }
   }
 
@@ -321,26 +333,26 @@
     c.stroke();
   }
 
-  /** 河口羽流：由尖端向海淡出，單一河口；唔再畫第二條入海河道 */
+  /** 河口羽流：喇叭展寬溶入海；分流上方再疊一層扇形淡水幕 */
   function drawMouthPlume(c, land) {
     if (land.length < 2) return;
     const tip = land[land.length - 1];
     const prev = land[Math.max(0, land.length - 4)];
     const w = sim.mouthWidth;
-    const hw = Math.max(w * 1.15, 36);
+    const hw = Math.max(w * 1.55, 55);
     const tx = tip.x - prev.x, ty = tip.y - prev.y;
     const tl = Math.hypot(tx, ty) || 1;
-    const ux = tx / tl, uy = Math.max(0.35, ty / tl); // 偏向向海
-    const seaY = Math.min(WH - 12, sim.waterLineY(tip.x) + hw * 0.9);
-    // 喇叭多邊形：尖端 → 海中淡出
+    const ux = tx / tl, uy = Math.max(0.4, ty / tl);
+    const seaY = Math.min(WH - 12, sim.waterLineY(tip.x) + hw * 1.05);
     const nx = -uy, ny = ux;
-    const p0 = { x: tip.x + nx * w * 0.55, y: tip.y + ny * w * 0.55 };
-    const p1 = { x: tip.x - nx * w * 0.55, y: tip.y - ny * w * 0.55 };
-    const p2 = { x: tip.x + ux * hw * 0.95 - nx * w * 0.15, y: Math.min(seaY, tip.y + uy * hw * 0.95) };
-    const p3 = { x: tip.x + ux * hw * 0.95 + nx * w * 0.15, y: Math.min(seaY, tip.y + uy * hw * 0.95) };
+    // 寬喇叭
+    const p0 = { x: tip.x + nx * w * 0.7, y: tip.y + ny * w * 0.7 };
+    const p1 = { x: tip.x - nx * w * 0.7, y: tip.y - ny * w * 0.7 };
+    const p2 = { x: tip.x + ux * hw * 1.05 - nx * w * 1.15, y: Math.min(seaY, tip.y + uy * hw * 1.05) };
+    const p3 = { x: tip.x + ux * hw * 1.05 + nx * w * 1.15, y: Math.min(seaY, tip.y + uy * hw * 1.05) };
     const grd = c.createLinearGradient(tip.x, tip.y, tip.x + ux * hw, tip.y + uy * hw);
-    grd.addColorStop(0, 'rgba(70,155,210,0.65)');
-    grd.addColorStop(0.45, 'rgba(65,140,200,0.28)');
+    grd.addColorStop(0, 'rgba(75,160,215,0.7)');
+    grd.addColorStop(0.4, 'rgba(70,145,205,0.32)');
     grd.addColorStop(1, 'rgba(55,120,180,0)');
     c.fillStyle = grd;
     c.beginPath();
@@ -349,6 +361,12 @@
     c.lineTo(p2.x, p2.y);
     c.lineTo(p3.x, p3.y);
     c.closePath();
+    c.fill();
+    // 扇形半透明罩：強調「散開入海」
+    c.fillStyle = 'rgba(90,170,215,0.14)';
+    c.beginPath();
+    c.moveTo(tip.x, tip.y);
+    c.ellipse(tip.x + ux * hw * 0.35, tip.y + uy * hw * 0.35, w * 1.35, hw * 0.55, Math.atan2(uy, ux), 0, Math.PI * 2);
     c.fill();
   }
 
@@ -437,7 +455,7 @@
   function drawDistributaries(c) {
     const arms = sim.distributaries();
     if (!arms.length) return;
-    const w0 = Math.max(6, sim.mouthWidth * 0.2);
+    const w0 = Math.max(10, sim.mouthWidth * 0.32);
     c.lineCap = 'round'; c.lineJoin = 'round';
     for (const arm of arms) {
       // 越近尖端越窄、越淡 → 溶入海
@@ -543,18 +561,19 @@
 
   function drawParticles(c, land) {
     c.save(); c.lineCap = 'round';
-    // 只在陸上河段顯示流動粒子；接近河口淡出；牛軛湖唔會有
     const tipY = land[land.length - 1].y;
     for (const q of state.particles) {
       if (q.lx == null || q.px == null) continue;
-      if (q.py > tipY - 15) continue; // 入海／羽流區唔畫
+      if (q.py > tipY - 8) continue;
       if (q.py > sim.waterLineY(q.px) - 2) continue;
       const a = toScreen({ x: q.lx, y: q.ly }), b = toScreen({ x: q.px, y: q.py });
       const dx = b.x - a.x, dy = b.y - a.y;
-      if (dx * dx + dy * dy > 900) continue;
-      const k = 3.2;
-      c.strokeStyle = `rgba(255,255,255,${0.35 + 0.45 * Math.min(1, q.speed / 1.6)})`;
-      c.lineWidth = 1.2 + q.speed * 0.8;
+      if (dx * dx + dy * dy > 1200) continue;
+      // 上游長亮拖尾；河口短而淡
+      const sp = Math.max(0.25, q.speed || 1);
+      const k = 2.2 + sp * 2.4;
+      c.strokeStyle = `rgba(255,255,255,${0.28 + 0.55 * Math.min(1, sp / 1.8)})`;
+      c.lineWidth = 1.0 + sp * 1.05;
       c.beginPath(); c.moveTo(b.x - dx * k, b.y - dy * k); c.lineTo(b.x, b.y); c.stroke();
     }
     c.restore();
@@ -696,6 +715,8 @@
     $('sO').textContent = sim.oxbows.length;
     if ($('sWiden')) $('sWiden').textContent = has ? (sim.widenRatio.toFixed(2) + '×') : '–';
     if ($('sDelta')) $('sDelta').textContent = has ? Math.round(sim.deltaAdvance) : '–';
+    if ($('vUp')) $('vUp').textContent = sim.upstreamVelocity.toFixed(1);
+    if ($('vDn')) $('vDn').textContent = sim.mouthVelocity.toFixed(1);
   }
 
   $('btnDraw').onclick = () => setDrawMode(!state.drawMode);
@@ -706,7 +727,7 @@
 
   const q = $('q'), vv = $('v'), t = $('t');
   q.oninput = () => { sim.Q = +q.value; $('qVal').textContent = q.value; sim.onParamChange(); updateStats(); };
-  vv.oninput = () => { sim.v = +vv.value; $('vVal').textContent = (+vv.value).toFixed(1); sim.onParamChange(); updateStats(); };
+  vv.oninput = () => { sim.v = +vv.value; $('vVal').textContent = (+vv.value).toFixed(1); sim.onParamChange(); updateStats(); toast('中游參考 ' + sim.v.toFixed(1) + ' → 上游約 ' + sim.upstreamVelocity.toFixed(1) + '、下游約 ' + sim.mouthVelocity.toFixed(1) + ' m/s', 2200); };
   t.oninput = () => { state.timeSpeed = +t.value; $('tVal').textContent = t.value; };
   $('lyParticles').onchange = e => state.layers.particles = e.target.checked;
   $('lyLabels').onchange = e => state.layers.labels = e.target.checked;

@@ -48,10 +48,14 @@
         <input id="q" type="range" min="100" max="2000" step="50" value="600">
       </label>
       <label class="slider">
-        <span class="lab">流速 <small>Velocity</small></span>
+        <span class="lab">流速（中游參考） <small>Mid velocity</small></span>
         <span class="val"><b id="vVal">1.2</b> m/s</span>
         <input id="v" type="range" min="0.3" max="3" step="0.1" value="1.2">
       </label>
+      <p class="hint-v" style="margin:-4px 0 8px;font-size:12px;opacity:0.85;line-height:1.45">
+        上游流速 <b id="vUp">1.8</b> · 下游流速 <b id="vDn">0.7</b> m/s
+        <br><small>凹形縱剖面：上游快、下游慢；河口展寬分流</small>
+      </p>
       <label class="slider">
         <span class="lab">時間速度 <small>Time speed</small></span>
         <span class="val"><b id="tVal">10</b> 年/秒</span>
@@ -81,7 +85,7 @@
         <label><input type="checkbox" id="lyHistory" checked> 舊河道痕跡</label>
       </div>
       <ul class="legend">
-        <li><i style="background:#3b8fd8"></i>河水（白點越快＝流速越高）</li>
+        <li><i style="background:#3b8fd8"></i>河水（上游白點快／長；下游慢／散）</li>
         <li><i style="background:#e0533d"></i>外彎侵蝕（河岸後退）</li>
         <li><i style="background:#ecd59c"></i>內彎沉積（曲流沙洲 point bar）</li>
         <li><i style="background:#5a7a62"></i>漬水／牛軛湖 stagnant oxbow</li>

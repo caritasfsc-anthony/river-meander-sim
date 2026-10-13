@@ -33,7 +33,13 @@ function run(Q, v, years) {
   sim.setPath(RiverSim.presetPath(sim.worldW, sim.worldH, sim.oceanH));
   assertSimpleChannel(sim, 'Q' + Q + ' init');
   assertCentered(sim, 'Q' + Q + ' init');
-  assert(sim.widthAt(1) > sim.widthAt(0) * 1.15);
+  assert(sim.widthAt(1) > sim.widthAt(0) * 1.4, 'mouth should flare');
+  // Longitudinal velocity: upstream fast, mouth slow
+  assert(sim.velocityAt(0.05) > sim.v * 1.25, 'upstream v');
+  assert(sim.velocityAt(0.95) < sim.v * 0.75, 'mouth v');
+  assert(sim.velocityAt(0.05) > sim.velocityAt(0.5) && sim.velocityAt(0.5) > sim.velocityAt(0.95), 'v decreases downstream');
+  // Lower reach width jumps in last 30%
+  assert(sim.widthAt(1) > sim.widthAt(0.7) * 1.15, 'lower-reach flare');
   const sins = [];
   for (let y = 0; y < years; y++) {
     sim.advance(1);
@@ -92,4 +98,9 @@ pre.setPath(RiverSim.presetPath(pre.worldW, pre.worldH, pre.oceanH));
 assertCentered(pre, 'preset');
 assert(pre.sinuosity() >= 1.12 && pre.sinuosity() <= 1.9, 'preset sin=' + pre.sinuosity());
 console.log('preset sin=' + pre.sinuosity().toFixed(2) + ' meanX=' + pre.channelXStats().mean.toFixed(0));
+const vv = new RiverSim({ v: 1.2 });
+assert(Math.abs(vv.velocityAt(0) / 1.2 - 1.5) < 0.08);
+assert(vv.velocityAt(1) / 1.2 < 0.7);
+assert(vv.migrateScaleAt(0.2) > vv.migrateScaleAt(0.9));
+console.log('velocity profile OK up=' + vv.upstreamVelocity.toFixed(2) + ' dn=' + vv.mouthVelocity.toFixed(2));
 console.log('ALL OK');
