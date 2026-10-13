@@ -83,18 +83,21 @@
 
   function clearHistory() { hctx.clearRect(0, 0, hist.width, hist.height); state.lastHistYear = -99; }
   function stampHistory() {
-    const p = sim.pts; if (p.length < 2) return;
+    const p = sim.landChannel().filter(q => q.y < sim.coastY(q.x) - 4);
+    if (p.length < 2) return;
     hctx.save(); hctx.scale(1 / RES, 1 / RES);
     hctx.strokeStyle = 'rgba(226,206,150,0.06)';
-    hctx.lineWidth = sim.width * 1.15; hctx.lineCap = 'round'; hctx.lineJoin = 'round';
+    hctx.lineWidth = sim.width * 1.0; hctx.lineCap = 'round'; hctx.lineJoin = 'round';
     pathOf(hctx, p); hctx.stroke();
     hctx.restore();
   }
   function stampOxbow(o) {
+    const pts = o.pts.filter(q => q.y < sim.coastY(q.x) - 6);
+    if (pts.length < 4) return;
     hctx.save(); hctx.scale(1 / RES, 1 / RES);
-    hctx.strokeStyle = 'rgba(205,190,140,0.55)';
-    hctx.lineWidth = o.width * 1.05; hctx.lineCap = 'round'; hctx.lineJoin = 'round';
-    pathOf(hctx, o.pts); hctx.stroke(); hctx.restore();
+    hctx.strokeStyle = 'rgba(160,150,110,0.4)';
+    hctx.lineWidth = o.width * 0.9; hctx.lineCap = 'round'; hctx.lineJoin = 'round';
+    pathOf(hctx, pts); hctx.stroke(); hctx.restore();
   }
   function pathOf(c, p) { c.beginPath(); c.moveTo(p[0].x, p[0].y); for (let i = 1; i < p.length; i++) c.lineTo(p[i].x, p[i].y); }
 
@@ -138,6 +141,8 @@
       q.lx = q.px; q.ly = q.py;
       q.px = l2.x + l2.nx * q.o * W * 0.5;
       q.py = l2.y + l2.ny * q.o * W * 0.5;
+      // 入海即重生喺上游（唔喺海面畫流動）
+      if (q.py > sim.coastY(q.px) - 4) { q.f = Math.random() * 0.7; q.px = null; }
     }
   }
 
@@ -149,37 +154,29 @@
     c.drawImage(terrain, 0, 0, WW, WH);
     if (state.layers.history) c.drawImage(hist, 0, 0, WW, WH);
 
-    // 動態海岸 + 三角洲（蓋過地形海洋區）
-    drawCoastAndDelta(c);
-
-    // 牛軛湖：U/C 形，慢慢淤積變淺、變濁
+    // 牛軛湖先畫，之後海洋會蓋住任何誤入海區嘅痕跡
     for (const o of sim.oxbows) {
       drawOxbow(c, o);
     }
 
-    const p = sim.pts, W = sim.width, g = sim.geom;
-    if (p.length >= 2 && g) {
-      c.lineCap = 'round'; c.lineJoin = 'round';
-      c.strokeStyle = '#a88b5c'; c.lineWidth = W + 16; pathOf(c, p); c.stroke();
-      c.strokeStyle = '#3b8fd8'; c.lineWidth = W; pathOf(c, p); c.stroke();
-      c.strokeStyle = 'rgba(25,90,165,0.55)'; c.lineWidth = W * 0.35; c.beginPath();
-      for (let i = 0; i < p.length; i++) {
-        const off = -Math.max(-0.3, Math.min(0.3, g.cw[i] * 0.9)) * W;
-        const x = p[i].x + g.nx[i] * off, y = p[i].y + g.ny[i] * off;
-        i ? c.lineTo(x, y) : c.moveTo(x, y);
-      }
-      c.stroke();
-      drawBars(c, p, g, W);
-      drawErosion(c, p, g, W);
-      // 分流河道
+    // 動態海岸 + 三角洲（蓋過海區上嘅舊痕跡）
+    drawCoastAndDelta(c);
+
+    const land = sim.landChannel();
+    const g = sim.geom;
+    if (land.length >= 2 && g) {
+      drawVariableChannel(c, land, g);
+      drawBars(c, land, g);
+      drawErosion(c, land, g);
       drawDistributaries(c);
+      drawMouthPlume(c, land);
     }
     c.restore();
 
-    if (p.length >= 2 && g) {
-      if (state.layers.particles) drawParticles(c);
-      drawEnds(c);
-      if (state.layers.labels) drawLabels(c);
+    if (land.length >= 2 && g) {
+      if (state.layers.particles) drawParticles(c, land);
+      drawEnds(c, land);
+      if (state.layers.labels) drawLabels(c, land);
     }
     if (state.drawing && state.drawing.length > 1) {
       c.save(); c.strokeStyle = '#1f5f99'; c.lineWidth = 4; c.setLineDash([10, 7]); c.lineCap = 'round';
@@ -187,7 +184,95 @@
     }
     drawOceanLabel(c);
     drawScale(c);
-    if (p.length < 2 && !state.drawing) drawHint(c);
+    if (sim.pts.length < 2 && !state.drawing) drawHint(c);
+  }
+
+  function channelFrac(i, n) { return n <= 1 ? 0 : i / (n - 1); }
+
+  /** 沿程變寬河道：用左右岸多邊形繪製 */
+  function drawVariableChannel(c, land, g) {
+    // 末端略為提早收束，交俾羽流溶入海，避免「河喺海面蜿蜒」
+    const cut = Math.max(2, Math.floor(land.length * 0.97));
+    land = land.slice(0, cut);
+    const n = land.length;
+    const left = [], right = [];
+    for (let k = 0; k < n; k++) {
+      const idx = Math.min(g.nx.length - 1, land[k].i != null ? land[k].i : k);
+      const frac = channelFrac(k, n);
+      let w = sim.widthAt(frac);
+      // 最後一截逐漸透明感：闊度先略收再交羽流
+      if (frac > 0.9) w *= 1 + (frac - 0.9) * 2.5;
+      const nx = g.nx[idx] || 0, ny = g.ny[idx] || 1;
+      left.push({ x: land[k].x + nx * w * 0.5, y: land[k].y + ny * w * 0.5 });
+      right.push({ x: land[k].x - nx * w * 0.5, y: land[k].y - ny * w * 0.5 });
+    }
+    // 河岸
+    c.beginPath();
+    c.moveTo(left[0].x, left[0].y);
+    for (const q of left) c.lineTo(q.x, q.y);
+    for (let k = right.length - 1; k >= 0; k--) c.lineTo(right[k].x, right[k].y);
+    c.closePath();
+    c.fillStyle = '#a88b5c';
+    c.fill();
+    // 略內縮畫河水
+    c.beginPath();
+    for (let k = 0; k < n; k++) {
+      const idx = Math.min(g.nx.length - 1, land[k].i != null ? land[k].i : k);
+      const frac = channelFrac(k, n);
+      const w = sim.widthAt(frac) * 0.82;
+      const nx = g.nx[idx] || 0, ny = g.ny[idx] || 1;
+      const x = land[k].x + nx * w * 0.5, y = land[k].y + ny * w * 0.5;
+      k ? c.lineTo(x, y) : c.moveTo(x, y);
+    }
+    for (let k = n - 1; k >= 0; k--) {
+      const idx = Math.min(g.nx.length - 1, land[k].i != null ? land[k].i : k);
+      const frac = channelFrac(k, n);
+      const w = sim.widthAt(frac) * 0.82;
+      const nx = g.nx[idx] || 0, ny = g.ny[idx] || 1;
+      c.lineTo(land[k].x - nx * w * 0.5, land[k].y - ny * w * 0.5);
+    }
+    c.closePath();
+    c.fillStyle = '#3b8fd8';
+    c.fill();
+    // 深泓線（偏外彎）
+    c.strokeStyle = 'rgba(25,90,165,0.45)';
+    c.lineWidth = Math.max(4, sim.widthAt(0.5) * 0.22);
+    c.lineCap = 'round'; c.lineJoin = 'round';
+    c.beginPath();
+    for (let k = 0; k < n; k++) {
+      const idx = Math.min(g.cw.length - 1, land[k].i != null ? land[k].i : k);
+      const w = sim.widthAt(channelFrac(k, n));
+      const off = -Math.max(-0.25, Math.min(0.25, (g.cw[idx] || 0) * 0.85)) * w;
+      const nx = g.nx[idx] || 0, ny = g.ny[idx] || 0;
+      const x = land[k].x + nx * off, y = land[k].y + ny * off;
+      k ? c.lineTo(x, y) : c.moveTo(x, y);
+    }
+    c.stroke();
+  }
+
+  /** 河口羽流：河道在三角洲尖端加闊、變淡，溶入海洋（唔再畫出海面河曲） */
+  function drawMouthPlume(c, land) {
+    if (land.length < 2) return;
+    const tip = land[land.length - 1];
+    const w = sim.mouthWidth;
+    const hw = Math.max(w * 1.2, 40);
+    // 喇叭口半透明
+    const grd = c.createRadialGradient(tip.x, tip.y, w * 0.2, tip.x, tip.y + hw * 0.6, hw * 1.4);
+    grd.addColorStop(0, 'rgba(80,160,210,0.55)');
+    grd.addColorStop(0.45, 'rgba(70,140,195,0.28)');
+    grd.addColorStop(1, 'rgba(60,120,180,0)');
+    c.fillStyle = grd;
+    c.beginPath();
+    c.ellipse(tip.x, tip.y + hw * 0.35, hw * 0.95, hw * 0.7, 0, 0, Math.PI * 2);
+    c.fill();
+    // 短羽流條帶（向海淡出）
+    c.strokeStyle = 'rgba(90,170,215,0.35)';
+    c.lineWidth = w * 0.9;
+    c.lineCap = 'round';
+    c.beginPath();
+    c.moveTo(tip.x, tip.y);
+    c.lineTo(tip.x, Math.min(WH - 20, tip.y + hw * 0.85));
+    c.stroke();
   }
 
   function drawCoastAndDelta(c) {
@@ -264,57 +349,72 @@
   function drawDistributaries(c) {
     const arms = sim.distributaries();
     if (!arms.length) return;
-    const w = Math.max(10, sim.width * 0.35);
+    const w0 = Math.max(8, sim.mouthWidth * 0.28);
     c.lineCap = 'round'; c.lineJoin = 'round';
     for (const arm of arms) {
-      c.strokeStyle = 'rgba(168,139,92,0.7)';
-      c.lineWidth = w + 8;
-      pathOf(c, arm); c.stroke();
-      c.strokeStyle = '#4a9ad0';
-      c.lineWidth = w;
-      pathOf(c, arm); c.stroke();
+      // 越近尖端越窄、越淡 → 溶入海
+      for (let seg = 0; seg < arm.length - 1; seg++) {
+        const t0 = seg / (arm.length - 1), t1 = (seg + 1) / (arm.length - 1);
+        const w = w0 * (1 - t0 * 0.55);
+        const alpha = 0.85 - t0 * 0.55;
+        c.strokeStyle = `rgba(168,139,92,${alpha * 0.7})`;
+        c.lineWidth = w + 6;
+        c.beginPath(); c.moveTo(arm[seg].x, arm[seg].y); c.lineTo(arm[seg + 1].x, arm[seg + 1].y); c.stroke();
+        c.strokeStyle = `rgba(74,154,208,${alpha})`;
+        c.lineWidth = w;
+        c.beginPath(); c.moveTo(arm[seg].x, arm[seg].y); c.lineTo(arm[seg + 1].x, arm[seg + 1].y); c.stroke();
+      }
     }
   }
 
   function drawOxbow(c, o) {
     const fade = Math.max(0, 1 - o.age / 1100);
-    if (fade < 0.05 || o.pts.length < 4) return;
-    const silt = Math.min(1, o.age / 700);
-    const w = o.width * (0.92 - 0.5 * silt);
+    const pts = o.pts.filter(q => q.y < sim.coastY(q.x) - 6);
+    if (fade < 0.05 || pts.length < 4) return;
+    const silt = Math.min(1, o.age / 650);
+    const w = o.width * (0.95 - 0.45 * silt);
     c.lineCap = 'round'; c.lineJoin = 'round';
-    // 外緣草地環
-    c.strokeStyle = `rgba(120,145,95,${0.55 * fade})`;
-    c.lineWidth = w + 12;
-    pathOf(c, o.pts); c.stroke();
-    // 湖水：由藍變濁綠／褐（淤積）
-    const r = Math.round(86 + silt * 50);
-    const g = Math.round(140 - silt * 20);
-    const b = Math.round(170 - silt * 80);
-    c.strokeStyle = `rgba(${r},${g},${b},${0.9 * fade})`;
+    c.strokeStyle = `rgba(180,165,120,${0.75 * fade})`;
+    c.lineWidth = w + 10;
+    pathOf(c, pts); c.stroke();
+    const r = Math.round(70 + silt * 55);
+    const gg = Math.round(95 + silt * 25);
+    const b = Math.round(78 - silt * 25);
+    c.strokeStyle = `rgba(${r},${gg},${b},${0.92 * fade})`;
     c.lineWidth = w;
-    pathOf(c, o.pts); c.stroke();
-    // 兩端略收，呈 C/U
-    const a = o.pts[0], z = o.pts[o.pts.length - 1];
-    c.fillStyle = `rgba(200,185,140,${0.35 * fade * silt})`;
-    c.beginPath(); c.arc(a.x, a.y, w * 0.35, 0, 7); c.fill();
-    c.beginPath(); c.arc(z.x, z.y, w * 0.35, 0, 7); c.fill();
+    pathOf(c, pts); c.stroke();
+    c.strokeStyle = `rgba(${r - 15},${gg - 10},${b - 10},${0.35 * fade})`;
+    c.lineWidth = w * 0.45;
+    pathOf(c, pts); c.stroke();
+    const a0 = pts[0], z = pts[pts.length - 1];
+    c.fillStyle = `rgba(190,175,130,${0.45 * fade})`;
+    c.beginPath(); c.arc(a0.x, a0.y, w * 0.28, 0, 7); c.fill();
+    c.beginPath(); c.arc(z.x, z.y, w * 0.28, 0, 7); c.fill();
   }
 
-  function drawBars(c, p, g, W) {
-    const n = p.length, thr = 0.07;
+  function drawBars(c, land, g) {
+    const n = land.length, thr = 0.07;
     let i = 0;
     while (i < n) {
-      if (Math.abs(g.cw[i]) <= thr) { i++; continue; }
-      const sign = Math.sign(g.cw[i]); let j = i;
-      while (j < n && Math.sign(g.cw[j]) === sign && Math.abs(g.cw[j]) > thr) j++;
+      const i0 = Math.min(g.cw.length - 1, land[i].i != null ? land[i].i : i);
+      if (Math.abs(g.cw[i0] || 0) <= thr) { i++; continue; }
+      const sign = Math.sign(g.cw[i0]); let j = i;
+      while (j < n) {
+        const ij = Math.min(g.cw.length - 1, land[j].i != null ? land[j].i : j);
+        if (Math.sign(g.cw[ij] || 0) !== sign || Math.abs(g.cw[ij] || 0) <= thr) break;
+        j++;
+      }
       if (j - i >= 2) {
         const outer = [], inner = [];
         for (let k = Math.max(0, i - 1); k <= Math.min(n - 1, j); k++) {
-          const a = Math.max(0, Math.abs(g.cw[k]) - thr);
+          const ik = Math.min(g.cw.length - 1, land[k].i != null ? land[k].i : k);
+          const W = sim.widthAt(channelFrac(k, n));
+          const a = Math.max(0, Math.abs(g.cw[ik] || 0) - thr);
           const bw = W * Math.min(0.5, 1.6 * a);
           const ex = W / 2 + 4;
-          outer.push({ x: p[k].x + g.nx[k] * sign * ex, y: p[k].y + g.ny[k] * sign * ex });
-          inner.push({ x: p[k].x + g.nx[k] * sign * (ex - bw - 4), y: p[k].y + g.ny[k] * sign * (ex - bw - 4) });
+          const nx = g.nx[ik] || 0, ny = g.ny[ik] || 0;
+          outer.push({ x: land[k].x + nx * sign * ex, y: land[k].y + ny * sign * ex });
+          inner.push({ x: land[k].x + nx * sign * (ex - bw - 4), y: land[k].y + ny * sign * (ex - bw - 4) });
         }
         c.beginPath(); c.moveTo(outer[0].x, outer[0].y);
         for (const q of outer) c.lineTo(q.x, q.y);
@@ -323,31 +423,39 @@
         c.fillStyle = '#ecd59c'; c.fill();
         c.strokeStyle = 'rgba(190,160,95,0.8)'; c.lineWidth = 3; c.stroke();
       }
-      i = j;
+      i = Math.max(j, i + 1);
     }
   }
 
-  function drawErosion(c, p, g, W) {
+  function drawErosion(c, land, g) {
     let maxR = 1e-6;
-    for (let i = 0; i < p.length; i++) maxR = Math.max(maxR, Math.abs(g.R[i]));
+    for (let i = 0; i < g.R.length; i++) maxR = Math.max(maxR, Math.abs(g.R[i]));
     c.lineCap = 'round';
-    for (let i = 0; i < p.length - 1; i++) {
-      const r = (g.R[i] + g.R[i + 1]) / 2, a = Math.abs(r) / Math.max(maxR, 0.25);
+    for (let i = 0; i < land.length - 1; i++) {
+      const i0 = Math.min(g.R.length - 1, land[i].i != null ? land[i].i : i);
+      const i1 = Math.min(g.R.length - 1, land[i + 1].i != null ? land[i + 1].i : i + 1);
+      const r = ((g.R[i0] || 0) + (g.R[i1] || 0)) / 2;
+      const a = Math.abs(r) / Math.max(maxR, 0.25);
       if (a < 0.18) continue;
+      const W = sim.widthAt(channelFrac(i, land.length));
       const sgn = -Math.sign(r), off = W / 2 + 6;
       c.strokeStyle = `rgba(224,83,61,${Math.min(0.95, a)})`;
       c.lineWidth = 6 + 10 * Math.min(1, a);
       c.beginPath();
-      c.moveTo(p[i].x + g.nx[i] * sgn * off, p[i].y + g.ny[i] * sgn * off);
-      c.lineTo(p[i + 1].x + g.nx[i + 1] * sgn * off, p[i + 1].y + g.ny[i + 1] * sgn * off);
+      c.moveTo(land[i].x + (g.nx[i0] || 0) * sgn * off, land[i].y + (g.ny[i0] || 0) * sgn * off);
+      c.lineTo(land[i + 1].x + (g.nx[i1] || 0) * sgn * off, land[i + 1].y + (g.ny[i1] || 0) * sgn * off);
       c.stroke();
     }
   }
 
-  function drawParticles(c) {
+  function drawParticles(c, land) {
     c.save(); c.lineCap = 'round';
+    // 只在陸上河段顯示流動粒子；接近河口淡出；牛軛湖唔會有
+    const tipY = land[land.length - 1].y;
     for (const q of state.particles) {
       if (q.lx == null || q.px == null) continue;
+      if (q.py > tipY - 15) continue; // 入海／羽流區唔畫
+      if (q.py > sim.coastY(q.px) + 5) continue;
       const a = toScreen({ x: q.lx, y: q.ly }), b = toScreen({ x: q.px, y: q.py });
       const dx = b.x - a.x, dy = b.y - a.y;
       if (dx * dx + dy * dy > 900) continue;
@@ -377,36 +485,44 @@
     c.fillText(sub, x + w / 2, y + 30);
   }
 
-  function drawLabels(c) {
-    const g = sim.geom, W = sim.width, bends = sim.sharpestBends(state.view.cw < 640 ? 1 : 2);
+  function drawLabels(c, land) {
+    const g = sim.geom, bends = sim.sharpestBends(state.view.cw < 640 ? 1 : 2);
+    const nL = land.length;
     for (const i of bends) {
-      const p = sim.pts[i], sign = Math.sign(g.cw[i]);
+      // 只標示仍在陸上河段內的彎
+      if (i >= g.cw.length) continue;
+      const p = sim.pts[i];
+      if (p.y > sim.coastY(p.x) + 5) continue;
+      const sign = Math.sign(g.cw[i] || 1);
+      const frac = i / Math.max(1, sim.pts.length - 1);
+      const W = sim.widthAt(frac);
       const outer = { x: p.x - g.nx[i] * sign * (W / 2 + 8), y: p.y - g.ny[i] * sign * (W / 2 + 8) };
       const inner = { x: p.x + g.nx[i] * sign * (W / 2), y: p.y + g.ny[i] * sign * (W / 2) };
       const d = (state.view.cw < 640 ? 26 : 46) / state.view.s + W;
       const oL = { x: p.x - g.nx[i] * sign * d * 1.3, y: p.y - g.ny[i] * sign * d * 1.3 };
       const iL = { x: p.x + g.nx[i] * sign * d * 1.3, y: p.y + g.ny[i] * sign * d * 1.3 };
-      for (const [a, b, t, s, col] of [[outer, oL, '外彎 · 侵蝕', 'outer bank erosion', '#d2462f'], [inner, iL, '內彎 · 沉積', 'inner bank deposition', '#c08a1e']]) {
-        const A = toScreen(a), B = toScreen(b);
+      for (const [aa, bb, t, sub, col] of [[outer, oL, '外彎 · 侵蝕', 'outer bank erosion', '#d2462f'], [inner, iL, '內彎 · 沉積', 'inner bank deposition', '#c08a1e']]) {
+        const A = toScreen(aa), B = toScreen(bb);
         c.strokeStyle = col; c.lineWidth = 2; c.beginPath(); c.moveTo(A.x, A.y); c.lineTo(B.x, B.y); c.stroke();
         c.fillStyle = col; c.beginPath(); c.arc(A.x, A.y, 4, 0, 7); c.fill();
-        pill(c, B.x, B.y, t, s, col);
+        pill(c, B.x, B.y, t, sub, col);
       }
     }
     for (const o of sim.oxbows) {
-      if (o.age > 280) continue;
+      if (o.age > 320) continue;
       const m = o.pts[Math.floor(o.pts.length / 2)], s = toScreen(m);
-      pill(c, s.x, s.y - 30, '牛軛湖', 'oxbow lake (yr ' + Math.round(o.year) + ')', '#3f7391');
+      pill(c, s.x, s.y - 30, '漬水／牛軛湖', 'stagnant oxbow (yr ' + Math.round(o.year) + ')', '#4a5f48');
     }
-    if (sim.deltaAdvance > 40 && sim.pts.length) {
-      const mouth = sim.pts[sim.pts.length - 1];
-      const s = toScreen({ x: mouth.x, y: (sim.baseCoastY + sim.mouthY) / 2 });
+    if (sim.deltaAdvance > 35 && land.length) {
+      const tip = land[land.length - 1];
+      const s = toScreen({ x: tip.x, y: (sim.baseCoastY + tip.y) / 2 });
       pill(c, s.x, s.y, '三角洲', 'delta · ' + Math.round(sim.deltaAdvance) + ' m', '#8a6a30');
     }
   }
 
-  function drawEnds(c) {
-    const p = sim.pts, a = toScreen(p[0]), b = toScreen(p[p.length - 1]);
+  function drawEnds(c, land) {
+    if (!land || land.length < 2) return;
+    const a = toScreen(land[0]), b = toScreen(land[land.length - 1]);
     c.font = '600 12px "Noto Sans TC",sans-serif'; c.textAlign = 'center';
     const tags = [[a, '↑ 上游'], [b, '河口 ↓']];
     for (const [q, t] of tags) {
@@ -474,7 +590,7 @@
   }
   function updateStats() {
     $('year').textContent = Math.floor(sim.year);
-    $('sW').textContent = sim.width.toFixed(0);
+    $('sW').textContent = Math.round(sim.upstreamWidth) + '→' + Math.round(sim.mouthWidth);
     $('sH').textContent = sim.depth.toFixed(1);
     const has = sim.pts.length >= 2;
     $('sS').textContent = has ? sim.sinuosity().toFixed(2) : '–';

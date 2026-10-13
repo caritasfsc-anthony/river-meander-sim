@@ -77,17 +77,33 @@
 
     /** 目前河口／三角洲尖端的大約 y */
     get mouthY() {
-      return Math.min(this.worldH - 40, this.baseCoastY + this.deltaAdvance * 0.92);
+      // 三角洲尖端（沙洲上），唔好伸入遠海
+      return Math.min(this.worldH - 60, this.baseCoastY + this.deltaAdvance * 0.82);
     }
 
     get baseWidth() { return 3.2 * Math.sqrt(this.Q); }
 
+    /** 中游參考河寬（受流量＋侵蝕加闊影響） */
     get width() {
       const base = this.baseWidth;
       const ceil = base * 2.6;
       const extra = (ceil - base) * (1 - Math.exp(-this.erosionWiden / (base * 2.2)));
       return base + extra;
     }
+
+    /** 沿程河寬：上游較窄 → 河口明顯加闊（河口喇叭口） */
+    widthAt(frac) {
+      const mid = this.width;
+      const up = mid * 0.70;
+      const mouth = mid * 1.65;
+      const t = Math.max(0, Math.min(1, frac));
+      // 下游段加速加闊
+      const ease = t * t * (3 - 2 * t);
+      return up + (mouth - up) * (0.25 * t + 0.75 * ease);
+    }
+
+    get upstreamWidth() { return this.widthAt(0); }
+    get mouthWidth() { return this.widthAt(1); }
 
     get depth() { return this.Q / (this.width * this.v); }
     get ds() { return Math.max(22, this.baseWidth * 0.42); }
@@ -269,13 +285,13 @@
         };
       }
 
-      // 河口：跟隨三角洲尖端，並允許橫向輕微漂移（唔再釘死）
-      const mouthTargetY = this.mouthY;
+      // 河口：跟三角洲尖端（陸側），允許輕微橫漂
       const last = n - 1;
-      const driftX = (np[last].x - p[last].x) * 0.55; // 保留部分遷移
+      const tipX = p[last].x + (np[last].x - p[last].x) * 0.4;
+      const tipY = Math.min(this.mouthY, this.coastY(tipX) - 4);
       np[last] = {
-        x: p[last].x + driftX,
-        y: p[last].y + (mouthTargetY - p[last].y) * Math.min(1, 0.4 * dt + 0.08)
+        x: tipX,
+        y: p[last].y + (tipY - p[last].y) * Math.min(1, 0.45 * dt + 0.1)
       };
 
       const a = Math.min(0.05, 0.005 * dt);
@@ -288,9 +304,8 @@
       if (sm[0].y > sm[last].y - 100) sm[last].y = sm[0].y + 100;
 
       let nxt = resample(sm, ds);
-      // 節點上限：過長時略為加大間距，避免失控
       if (nxt.length > 420) nxt = resample(sm, ds * (nxt.length / 380));
-      this.pts = nxt;
+      this.pts = this.clipChannelToLand(nxt);
       this.year += dt;
       this.ph1 += (Math.random() - 0.5) * 0.4 * Math.sqrt(dt);
       this.ph2 += (Math.random() - 0.5) * 0.4 * Math.sqrt(dt);
@@ -331,11 +346,22 @@
     }
 
     oxbowOnLand(o) {
-      // 唔好整條都喺海裏面
+      // 漬水牛軛湖必須幾乎完全喺陸地上
       let sea = 0;
-      const coast = this.baseCoastY + Math.max(20, this.deltaAdvance * 0.15);
-      for (const q of o.pts) if (q.y > coast) sea++;
-      return sea < o.pts.length * 0.65;
+      for (const q of o.pts) {
+        if (q.y > this.coastY(q.x) - 8) sea++;
+      }
+      return sea < o.pts.length * 0.25;
+    }
+
+    /** 裁掉伸入海的牛軛湖點 */
+    clipOxbowPts(pts) {
+      return pts
+        .map(q => {
+          const cy = this.coastY(q.x) - 10;
+          return { x: q.x, y: Math.min(q.y, cy) };
+        })
+        .filter(q => q.y < this.baseCoastY + this.deltaAdvance * 0.5);
     }
 
     /**
@@ -388,7 +414,8 @@
       // 頸已夠窄（d < thr）且環路夠彎即截；靠 cooldown 避免連斬
       if (!immediate && d > W * 0.95 && this.sinuosity() < 3.0) return;
 
-      const oxPts = p.slice(i, j + 1).map(q => ({ x: q.x, y: q.y }));
+      let oxPts = p.slice(i, j + 1).map(q => ({ x: q.x, y: q.y }));
+      oxPts = this.clipOxbowPts(oxPts);
       if (oxPts.length >= 6 && this.oxbowOnLand({ pts: oxPts })) {
         this.oxbows.push({ pts: oxPts, age: 0, width: W * 0.9, year: this.year, closed: true });
       }
@@ -413,6 +440,47 @@
       this.computeGeom();
     }
 
+    /**
+     * 活躍河道只留在陸地／三角洲上：越过當地海岸線的點拉回岸上。
+     * 河口點放在三角洲尖端，唔再於開闊海面蜿蜒。
+     */
+    clipChannelToLand(pts) {
+      if (!pts || pts.length < 2) return pts;
+      const out = pts.map(q => ({ x: q.x, y: q.y }));
+      const n = out.length;
+      for (let i = 0; i < n - 1; i++) {
+        const cy = this.coastY(out[i].x);
+        // 留在海岸／三角洲陸側（略為離水線）
+        if (out[i].y > cy - 6) out[i].y = cy - 6;
+      }
+      // 河口：對齊三角洲尖端
+      const tipY = this.mouthY;
+      out[n - 1].y = tipY;
+      // 若尖端仍深過 local coast，貼住 coast（三角洲上）
+      const tipCoast = this.coastY(out[n - 1].x);
+      if (out[n - 1].y > tipCoast + 2) out[n - 1].y = tipCoast;
+      return out;
+    }
+
+    /** 繪圖用：只取仍在陸／三角洲上的活躍河段（唔畫出海面迴圈） */
+    landChannel() {
+      const p = this.pts;
+      if (p.length < 2) return [];
+      const out = [];
+      for (let i = 0; i < p.length; i++) {
+        const cy = this.coastY(p[i].x);
+        // 超過海岸太多＝已入海，截斷
+        if (p[i].y > cy + 12 && i > p.length * 0.5) break;
+        out.push({ x: p[i].x, y: p[i].y, i });
+      }
+      if (out.length < 2) return p.slice(0, Math.min(2, p.length)).map((q, i) => ({ x: q.x, y: q.y, i }));
+      // 確保最後一點喺三角洲尖端
+      const last = out[out.length - 1];
+      const tip = { x: p[p.length - 1].x, y: this.mouthY, i: p.length - 1 };
+      if (Math.hypot(last.x - tip.x, last.y - tip.y) > 8) out.push(tip);
+      return out;
+    }
+
     /** 海岸線 y(x)：三角洲扇形凸出 */
     coastY(x) {
       const base = this.baseCoastY;
@@ -430,30 +498,25 @@
 
     /** 分流河道（教學用 2–3 支） */
     distributaries() {
-      if (this.deltaAdvance < 25 || this.pts.length < 2) return [];
+      if (this.deltaAdvance < 20 || this.pts.length < 2) return [];
       const mouth = this.pts[this.pts.length - 1];
       const adv = this.deltaAdvance;
       const hw = this.deltaHalfW;
       const arms = [];
-      const angles = [-0.55, 0.05, 0.55];
-      const nArms = adv > 90 ? 3 : 2;
+      const angles = [-0.5, 0.0, 0.5];
+      const nArms = adv > 80 ? 3 : 2;
       for (let a = 0; a < nArms; a++) {
-        const ang = angles[a] + (a === 1 ? 0 : 0);
-        const len = adv * (0.75 + (a === 1 ? 0.2 : 0));
-        const tip = {
-          x: mouth.x + Math.sin(ang) * hw * 0.55,
-          y: mouth.y + Math.cos(ang) * len * 0.85
-        };
-        // 中間控制點
+        const ang = angles[a];
+        const len = Math.min(adv * 0.7, adv - 5) * (a === 1 ? 1.0 : 0.75);
+        const tipX = mouth.x + Math.sin(ang) * hw * 0.5;
+        let tipY = mouth.y + Math.max(12, len * 0.55);
+        // 尖端停在海岸線附近，唔伸入遠海
+        tipY = Math.min(tipY, this.coastY(tipX) + 4);
         const mid = {
-          x: mouth.x + Math.sin(ang) * hw * 0.28,
-          y: mouth.y + Math.cos(ang) * len * 0.4
+          x: mouth.x + Math.sin(ang) * hw * 0.22,
+          y: mouth.y + (tipY - mouth.y) * 0.45
         };
-        arms.push([
-          { x: mouth.x, y: mouth.y },
-          mid,
-          tip
-        ]);
+        arms.push([{ x: mouth.x, y: mouth.y }, mid, { x: tipX, y: tipY }]);
       }
       return arms;
     }
