@@ -1,4 +1,5 @@
 /* 河曲模擬核心 — 簡化中心線遷移模型（參考 Howard & Knutson, 1984）
+ * 地圖：上方＝上游（高地），下方＝河口／海洋。
  * 可在瀏覽器（window.RiverSim）或 Node（module.exports）使用。 */
 (function (root) {
   'use strict';
@@ -16,7 +17,6 @@
     return L;
   }
 
-  // 依固定間距重新取樣（保留兩端）
   function resample(pts, ds) {
     if (pts.length < 2) return pts.slice();
     const L = polyLength(pts);
@@ -38,7 +38,6 @@
     return out;
   }
 
-  // Chaikin 平滑（保留兩端）
   function chaikin(pts, iters) {
     let p = pts;
     for (let it = 0; it < iters; it++) {
@@ -58,18 +57,47 @@
   class RiverSim {
     constructor(opts) {
       opts = opts || {};
-      this.worldW = opts.worldW || 3000;   // 米
-      this.worldH = opts.worldH || 1800;
+      // 直向地圖：上＝上游，下＝海洋
+      this.worldW = opts.worldW || 2200;   // 米（東西）
+      this.worldH = opts.worldH || 3000;   // 米（南北）
+      this.oceanH = opts.oceanH || 320;    // 底部海洋帶高度
       this.Q = opts.Q || 600;              // 流量 m³/s
       this.v = opts.v || 1.2;              // 流速 m/s
-      this.omega = -1.0;                   // 局部曲率項
-      this.gamma = 2.5;                    // 上游滯後曲率項
-      this.lagWidths = 1.5;                // 滯後衰減長度（以河寬計）
+      this.omega = -1.0;
+      this.gamma = 2.5;
+      this.lagWidths = 1.5;
       this.baseRate = 18;
       this.noiseAmp = 0.15;
-      this.ph1 = Math.random() * 6.28; this.ph2 = Math.random() * 6.28;                  // 基本遷移係數 (m/年 / 無因次曲率)
+      this.ph1 = Math.random() * 6.28;
+      this.ph2 = Math.random() * 6.28;
+      this.widenScale = 0.05;              // 侵蝕轉化成加闊的係數
       this.reset();
     }
+
+    /** 陸地高度（不含海洋） */
+    get landH() { return this.worldH - this.oceanH; }
+
+    /** 由流量決定的基本河寬（下限） */
+    get baseWidth() { return 3.2 * Math.sqrt(this.Q); }
+
+    /**
+     * 實際河寬：基本寬度 × 侵蝕加闊。
+     * 外彎侵蝕累積越多，河道越闊；有軟上限（約 2.6×基本寬度），不會爆炸。
+     */
+    get width() {
+      const base = this.baseWidth;
+      const ceil = base * 2.6;
+      const extra = (ceil - base) * (1 - Math.exp(-this.erosionWiden / (base * 2.2)));
+      return base + extra;
+    }
+
+    get depth() { return this.Q / (this.width * this.v); }
+    get ds() { return Math.max(22, this.baseWidth * 0.42); }
+    get erodibility() {
+      return this.baseRate * Math.pow(this.v / 1.2, 1.5) * Math.pow(this.Q / 600, 0.5);
+    }
+    /** 侵蝕令河道加闊的倍數（1＝尚未加闊） */
+    get widenRatio() { return this.width / this.baseWidth; }
 
     reset() {
       this.pts = [];
@@ -80,26 +108,21 @@
       this.meanRate = 0;
       this.events = [];
       this.geom = null;
-    }
-
-    get width() { return 3.2 * Math.sqrt(this.Q); }      // 河寬隨流量增加
-    get depth() { return this.Q / (this.width * this.v); } // Q = W·h·v
-    get ds() { return this.width * 0.5; }
-    get erodibility() { // m/年，每單位無因次曲率
-      return this.baseRate * Math.pow(this.v / 1.2, 1.5) * Math.pow(this.Q / 600, 0.5);
+      this.erosionWiden = 0; // 累積侵蝕加闊量（米尺度）
     }
 
     setPath(points) {
       this.reset();
       if (!points || points.length < 2) return false;
       let p = points.map(q => ({ x: q.x, y: q.y }));
+      // 若用戶由下畫到上，自動反轉成上游→下游
+      if (p[0].y > p[p.length - 1].y) p = p.slice().reverse();
       p = resample(p, Math.max(5, this.ds / 3));
       p = chaikin(p, 2);
       p = resample(p, this.ds);
       this.pts = p;
       this.initial = p.map(q => ({ x: q.x, y: q.y }));
       this.computeGeom();
-      // 起始時若已自交，先截彎
       this.checkCutoffs();
       return true;
     }
@@ -140,7 +163,6 @@
         const l = (Math.hypot(ax, ay) + Math.hypot(bx, by)) / 2 || 1;
         C[i] = ang / l;
       }
-      // 曲率平滑 (1-2-1) ×2
       let cw = new Float64Array(n);
       for (let i = 0; i < n; i++) cw[i] = C[i] * W;
       for (let pass = 0; pass < 2; pass++) {
@@ -152,7 +174,6 @@
         t[0] = 0; t[n - 1] = 0;
         cw = t;
       }
-      // 上游滯後曲率（水流由第一點流向最後一點）
       const ds = n > 1 ? s[n - 1] / (n - 1) : 1;
       const L = this.lagWidths * W;
       const K = Math.max(1, Math.ceil(4 * L / ds));
@@ -164,20 +185,20 @@
         for (let k = 1; k <= K && i - k >= 0; k++) { acc += cw[i - k] * wts[k - 1]; ws += wts[k - 1]; }
         const lag = ws > 0 ? acc / ws : cw[i];
         R[i] = this.omega * cw[i] + this.gamma * lag;
-        // 細微隨機擾動：令直河段亦會慢慢發展出新河曲
-        R[i] += this.noiseAmp * Math.sin(2 * Math.PI * s[i] / (12 * W) + this.ph1) * Math.sin(2 * Math.PI * s[i] / (37 * W) + this.ph2);
+        R[i] += this.noiseAmp * Math.sin(2 * Math.PI * s[i] / (12 * W) + this.ph1)
+          * Math.sin(2 * Math.PI * s[i] / (37 * W) + this.ph2);
       }
       this.geom = { tx, ty, nx, ny, cw, R, s, length: n ? s[n - 1] : 0 };
       return this.geom;
     }
 
-    // 向外遷移：曲率 >0 表示向 +n 方向轉，外彎在 -n 方向
     step(dt) {
       const p = this.pts, n = p.length;
       if (n < 3) return 0;
       const g = this.geom || this.computeGeom();
       const E = this.erodibility;
       const ds = this.ds;
+      const landMax = this.landH - 8;
       let sum = 0;
       const np = new Array(n);
       for (let i = 0; i < n; i++) {
@@ -189,20 +210,22 @@
         if (d > lim) d = lim; else if (d < -lim) d = -lim;
         sum += Math.abs(d);
         let mx = -g.nx[i] * d, my = -g.ny[i] * d;
-        // 谷壁（地圖邊緣）較難侵蝕：靠近邊緣時減慢向外遷移
         const px = p[i].x, py = p[i].y;
         const ex = px < this.worldW / 2 ? px : this.worldW - px;
-        const ey = py < this.worldH / 2 ? py : this.worldH - py;
+        // 上下：頂部高地較難侵蝕；底部近海岸／河口亦限制向外移動
+        const eyTop = py;
+        const eyBot = landMax - py;
         const towardX = (px < this.worldW / 2 ? -mx : mx) > 0;
-        const towardY = (py < this.worldH / 2 ? -my : my) > 0;
+        const towardTop = -my > 0;
+        const towardBot = my > 0;
         if (towardX) mx *= wallFactor(ex);
-        if (towardY) my *= wallFactor(ey);
+        if (towardTop) my *= wallFactor(eyTop);
+        if (towardBot) my *= wallFactor(Math.max(0, eyBot));
         let x = Math.min(this.worldW - 10, Math.max(10, px + mx));
-        let y = Math.min(this.worldH - 10, Math.max(10, py + my));
+        let y = Math.min(landMax, Math.max(10, py + my));
         np[i] = { x, y };
       }
       np[0] = p[0]; np[n - 1] = p[n - 1];
-      // 輕微平滑以抑制數值噪音
       const a = Math.min(0.05, 0.005 * dt);
       const sm = np.map(q => ({ x: q.x, y: q.y }));
       for (let i = 1; i < n - 1; i++) {
@@ -213,11 +236,16 @@
       this.year += dt;
       this.ph1 += (Math.random() - 0.5) * 0.4 * Math.sqrt(dt);
       this.ph2 += (Math.random() - 0.5) * 0.4 * Math.sqrt(dt);
+
+      // 侵蝕加闊：平均遷移距離越大，河道越闊（軟上限）
+      const meanMig = sum / n;
+      this.erosionWiden += meanMig * this.widenScale;
+
       for (const o of this.oxbows) o.age += dt;
       this.oxbows = this.oxbows.filter(o => o.age < 900);
       this.checkCutoffs();
       this.computeGeom();
-      const rate = sum / n / dt;
+      const rate = meanMig / dt;
       this.meanRate = this.meanRate ? this.meanRate * 0.9 + rate * 0.1 : rate;
       return rate;
     }
@@ -236,7 +264,6 @@
       }
     }
 
-    // 截彎取直：非相鄰河段距離 < 河寬 → 形成牛軛湖
     checkCutoffs() {
       let found = true, loops = 0;
       while (found && loops++ < 5) {
@@ -269,10 +296,12 @@
           const ox = p.slice(i, j + 1).map(q => ({ x: q.x, y: q.y }));
           this.oxbows.push({ pts: ox, age: 0, width: W, year: this.year });
           const np = p.slice(0, i + 1).concat(p.slice(j));
-          // 接口附近局部平滑
           for (let it = 0; it < 6; it++) {
             for (let k = Math.max(1, i - 4); k <= Math.min(np.length - 2, i + 4); k++) {
-              np[k] = { x: (np[k - 1].x + 2 * np[k].x + np[k + 1].x) / 4, y: (np[k - 1].y + 2 * np[k].y + np[k + 1].y) / 4 };
+              np[k] = {
+                x: (np[k - 1].x + 2 * np[k].x + np[k + 1].x) / 4,
+                y: (np[k - 1].y + 2 * np[k].y + np[k + 1].y) / 4
+              };
             }
           }
           this.pts = resample(np, this.ds);
@@ -291,7 +320,6 @@
       return d > 0 ? polyLength(p) / d : 1;
     }
 
-    // 找出最急的彎位（作標示用）
     sharpestBends(maxCount) {
       const g = this.geom; if (!g) return [];
       const n = this.pts.length, cw = g.cw, cand = [];
@@ -308,14 +336,20 @@
       return out;
     }
 
-    static presetPath(worldW, worldH) {
+    /** 示範河道：由上方高地蜿蜒流到下方河口 */
+    static presetPath(worldW, worldH, oceanH) {
+      oceanH = oceanH == null ? 320 : oceanH;
+      const landH = worldH - oceanH;
       const pts = [];
-      const x0 = worldW * 0.06, x1 = worldW * 0.94;
-      for (let k = 0; k <= 200; k++) {
-        const t = k / 200, x = x0 + (x1 - x0) * t;
-        const env = Math.sin(Math.PI * t);
-        const y = worldH / 2 + worldH * 0.12 * env * Math.sin(2 * Math.PI * t * 3.4 + 0.3)
-          + worldH * 0.04 * Math.sin(2 * Math.PI * t * 7.1);
+      const y0 = worldH * 0.05, y1 = landH - 20;
+      const cx = worldW * 0.5;
+      for (let k = 0; k <= 220; k++) {
+        const t = k / 220;
+        const y = y0 + (y1 - y0) * t;
+        const env = Math.sin(Math.PI * t); // 兩端振幅較小
+        const x = cx
+          + worldW * 0.22 * env * Math.sin(2 * Math.PI * t * 3.2 + 0.4)
+          + worldW * 0.06 * Math.sin(2 * Math.PI * t * 7.3);
         pts.push({ x, y });
       }
       return pts;

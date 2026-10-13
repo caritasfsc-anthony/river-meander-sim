@@ -16,7 +16,7 @@ h1{font-size:1.25rem;margin:0}
 .yv{font-size:1.6rem;font-weight:700;font-variant-numeric:tabular-nums;color:var(--accent2)}
 .layout{display:grid;grid-template-columns:minmax(0,1fr) 330px;gap:14px;padding:14px;max-width:1500px;margin:0 auto}
 .stage{display:flex;flex-direction:column;gap:10px;min-width:0}
-.canvas-wrap{position:relative;width:100%;aspect-ratio:5/3;border-radius:16px;overflow:hidden;box-shadow:0 6px 24px #2a3b2f22;background:#9cc27a}
+.canvas-wrap{position:relative;width:100%;max-width:min(100%, calc(min(78vh, 820px) * 3 / 4));aspect-ratio:3/4;max-height:min(78vh, 820px);margin:0 auto;border-radius:16px;overflow:hidden;box-shadow:0 6px 24px #2a3b2f22;background:#9cc27a}
 canvas{display:block;width:100%;height:100%;touch-action:none;cursor:default}
 canvas.drawing{cursor:crosshair}
 .toast{position:absolute;left:50%;top:14px;transform:translateX(-50%);background:#1f2d27e6;color:#fff;padding:7px 14px;border-radius:999px;font-size:.9rem;opacity:0;transition:opacity .3s;pointer-events:none;white-space:nowrap;max-width:92%;overflow:hidden;text-overflow:ellipsis}
